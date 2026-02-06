@@ -1,0 +1,501 @@
+options {
+  STATIC = false;              // Genera clases no estáticas
+  UNICODE_INPUT = true;        // Para poder leer UTF-8 correctamente
+  IGNORE_CASE = false;         // Para que no sea insensible a Mayus o Minus
+  TOKEN_MANAGER_USES_PARSER = false;
+}
+
+
+/* ===== Configuración  ===== */
+PARSER_BEGIN(Virgulilla)
+public class Virgulilla {
+  public static String currentFilename = "<stdin>";
+  public static int lexicalErrors = 0;
+  public static int syntacticErrors = 0;
+
+  public static void main(String[] args) throws Exception {
+    String filename = (args.length > 0) ? args[0] : "<stdin>";
+    currentFilename = filename;
+
+    java.io.Reader r = (args.length > 0)
+        ? new java.io.InputStreamReader(new java.io.FileInputStream(args[0]), java.nio.charset.StandardCharsets.UTF_8)
+        : new java.io.InputStreamReader(System.in, java.nio.charset.StandardCharsets.UTF_8);
+
+    Virgulilla p = new Virgulilla(r);
+
+    try {
+      p.Program();
+    } catch (ParseException e) {
+      Token t = p.token;
+      int line = (t.next != null ? t.next.beginLine  : t.beginLine);
+      int col  = (t.next != null ? t.next.beginColumn: t.beginColumn);
+      System.err.printf(
+        "%s: error sintáctico fatal en línea %d, columna %d: %s%n",
+        filename, line, col, e.getMessage()
+      );
+      syntacticErrors++;
+    }
+
+    if (lexicalErrors == 0 && syntacticErrors == 0) {
+      System.out.println("Esta muy bien: La Gramática mínima esta bien escrita.");
+    } else {
+      System.err.printf(
+        "%s: se encontraron %d errores léxicos y %d error sintáctico en el archivo.%n",
+        filename, lexicalErrors, syntacticErrors
+      );
+    }
+  }
+}
+PARSER_END(Virgulilla)
+
+
+
+/* ===================== Gramática ======================= */
+
+void Program() :
+{ Token bad; }
+{
+  (
+    Statement()
+  | bad=<INVALID> {
+        System.err.printf(
+          "%s: error léxico en línea %d, columna %d: símbolo no reconocido \"%s\"%n",
+          Virgulilla.currentFilename,
+          bad.beginLine,
+          bad.beginColumn,
+          bad.image
+        );
+        Virgulilla.lexicalErrors++;
+    }
+  )*
+  <EOF>
+}
+
+
+
+/* ===================== Definiciones sintácticas ======================= */
+
+/* =================== INICIO: Globales =================== */
+
+/* ===== Siempre termina en FIN "~" ===== */
+void Statement() :
+{}
+{
+      VarDecl() <FIN> | Print() <FIN> | BreakC() <FIN> | ContinueC() <FIN> | ReturnC() <FIN> | LOOKAHEAD( IncDecSimple() ) IncDecSimple() <FIN> | LOOKAHEAD( Assignment() ) Assignment() <FIN> 
+      | ExprStatement() <FIN> | IfCond() | WhileC() | ForC() | TryCatch() | FuncDef() | Block()
+}
+
+/* ===== Definir bloques ===== */
+void Block() :
+{}
+{
+    <LLAVEABRE> ( Statement() )+ <LLAVECIERRA>
+}
+
+/* ===== Condición booleana general ===== */
+void Condicion() :
+{}
+{
+    OrExpr()
+}
+
+/* ===== El print ===== */
+void Print() :
+{}
+{
+    <PRINT> <PARENABRE> PrintArg() ( <COMA> PrintArg() )* <PARENCIERRA>
+}
+
+/* ===== Relleno de print ===== */
+void PrintArg() :
+{}
+{
+      Expresion() | <STRING>
+}
+
+/* ===== Sentencia try/catch ===== */
+void TryCatch() :
+{}
+{
+    <TRY> Block() <CATCH> Block()
+}
+
+/* =================== FIN: Globales =================== */
+
+
+/* =================== INICIO: Variables =================== */
+
+/* ===== Declaración de variable o constante ===== */
+void VarDecl() :
+{}
+{
+    ( <VAR> | <CONST> ) <IDENT> <IGUAL> Expresion()
+}
+
+/* ===== ReAsignación simple ===== */
+void Assignment() :
+{}
+{
+    <IDENT> <IGUAL> Expresion()
+}
+
+/* ===== Sentencia de expresión: una expresión sola con "~" ===== */
+void ExprStatement() :
+{}
+{
+    Expresion()
+}
+
+/** ===== Expresión con + y - de menor precedencia ===== */
+void Expresion() :
+{}
+{
+    Term() ( ( <SUMA> | <RESTA> ) Term() )*
+}
+
+/** ===== Término con *, / y % ===== */
+void Term() :
+{}
+{
+    Factor() ( ( <MULTI> | <DIV> | <MODULO> ) Factor() )*
+}
+
+/** ===== Factor: o algo numérico con signo opcional o un identificador ===== */
+void Factor() :
+{}
+{
+    SignoNumerico() | Indexable() | ArrayLiteral()
+}
+
+/** ===== Indexable: IDENT o llamada, con cero o más índices [expr] ===== */
+void Indexable() :
+{}
+{
+    IdentOrCall() ( <CORCHETEABRE> Expresion() <CORCHETECIERRA> )*
+}
+
+/** ===== ArrayList: [ expr, expr, ... ] puede estar vacío ===== */
+void ArrayLiteral() :
+{}
+{
+    <CORCHETEABRE> ( Expresion() ( <COMA> Expresion() )* )? <CORCHETECIERRA>
+}
+
+/** ===== SignoNumerico: número o expresión entre paréntesis, con signo opcional ===== */
+void SignoNumerico() :
+{}
+{
+    ( <SUMA> | <RESTA> )? Numerico()
+}
+
+/** ===== Numerico: algo que es numérico ===== */
+void Numerico() :
+{}
+{
+      <INT> | <FLOAT> | <PARENABRE> Expresion() <PARENCIERRA>
+}
+
+/* =================== FIN: Variables =================== */
+
+
+/* =================== INICIO: Booleanos =================== */
+
+/* ===== OR: expr1 || expr2 || expr3, también con "|" ===== */
+void OrExpr() :
+{}
+{
+    AndExpr() ( ( <OROR> | <OR> ) AndExpr() )*
+}
+
+/* ===== AND: expr1 && expr2 && expr3, también con "&" ===== */
+void AndExpr() :
+{}
+{
+    NotExpr() ( ( <ANDAND> | <AND> ) NotExpr() )*
+}
+
+/* ===== NOT: !expr ===== */
+void NotExpr() :
+{}
+{
+      ( <EXCLAMACION> )? BoolAtom()
+}
+
+/* ===== Elemento básico booleano ===== */
+void BoolAtom() :
+{}
+{
+      <TRUE> | <FALSE> | LOOKAHEAD( Relacional() ) Relacional() | <PARENABRE> Condicion() <PARENCIERRA>
+}
+
+/* ===== Comparaciones: x < 10, x == y, etc. ===== */
+void Relacional() :
+{}
+{
+    Expresion() ( <IGUALIGUAL> | <DISTINTO> | <MENORQ> | <MAYORQ> | <MENORIGUAL> | <MAYORIGUAL> ) Expresion() 
+}
+
+/* =================== FIN: Booleanos =================== */
+
+
+/* =================== INICIO : Condicionales =================== */
+
+/* ===== Sentencia if / elif / else ===== */
+void IfCond() :
+{}
+{
+    <IF> <PARENABRE> Condicion() <PARENCIERRA> Block() RestoIf()
+}
+
+/* ===== Cadena de elif / else ===== */
+void RestoIf() :
+{}
+{
+    (
+        <ELIF> <PARENABRE> Condicion() <PARENCIERRA> Block() RestoIf()
+      | <ELSE> Block()
+    )?
+}
+
+/* =================== FIN : Condicionales =================== */
+
+
+/* =================== INICIO : Ciclos =================== */
+
+/* ===== Sentencia while ===== */
+void WhileC() :
+{}
+{
+    <WHILE> <PARENABRE> Condicion() <PARENCIERRA> Block()
+}
+
+/* ===== Sentencia break ===== */
+void BreakC() :
+{}
+{
+    <BREAK>
+}
+
+/* ===== Sentencia continue ===== */
+void ContinueC() :
+{}
+{
+    <CONTINUE>
+}
+
+/* ===== Incremento-Decremento: i++ i-- ===== */
+void IncDecSimple() :
+{}
+{
+    <IDENT> ( <SUMAMAS> | <RESTAMENOS> )
+}
+
+/* ===== Declaración sin FIN (para el for) ===== */
+void VarDeclNoFin() :
+{}
+{
+    ( <VAR> | <CONST> ) <IDENT> <IGUAL> Expresion()
+}
+
+/* ===== Asignación sin FIN (para el for) ===== */
+void AssignmentNoFin() :
+{}
+{
+    <IDENT> <IGUAL> Expresion()
+}
+
+/* ===== Inicialización del for: var/const o asignación simple ===== */
+void ForInit() :
+{}
+{
+      VarDeclNoFin() | AssignmentNoFin()
+}
+
+/* ===== Actualización del for: asignación o i++ ===== */
+void ForUpdate() :
+{}
+{
+      LOOKAHEAD( IncDecSimple() ) IncDecSimple() | AssignmentNoFin()
+}
+
+/* ===== Sentencia for ===== */
+void ForC() :
+{}
+{
+    <FOR> <PARENABRE> ForInit() <PUNTOCOMA> Condicion() <PUNTOCOMA> ForUpdate() <PARENCIERRA> Block()
+}
+
+/* =================== FIN : Ciclos =================== */
+
+
+/* =================== INICIO : Funciones =================== */
+
+/* ===== Sentencia return ===== */
+void ReturnC() :
+{}
+{
+    <RETURN> ( Expresion() )?
+}
+
+/* ===== Lista de parámetros de la función ===== */
+void ParamDef() :
+{}
+{
+    <IDENT> ( <COMA> <IDENT> )*
+}
+
+/* ===== Sentencia función ===== */
+void FuncDef() :
+{}
+{
+    <FUNCION> <IDENT> <PARENABRE> ( ParamDef() )? <PARENCIERRA> Block()
+}
+
+/* ===== Lista de argumentos en una llamada ===== */
+void ArgList() :
+{}
+{
+    Expresion() ( <COMA> Expresion() )*
+}
+
+/* ===== Identificador solo o llamada a función ===== */
+void IdentOrCall() :
+{}
+{
+    <IDENT> (<PARENABRE> ( ArgList() )? <PARENCIERRA> )?
+}
+
+/* =================== FIN : Funciones =================== */
+
+
+
+/* ==================== Definiciones léxicas ================== */
+
+/* ===== Espacios y comentarios ===== */
+SKIP : {
+    " " | "\t" | "\r" | "\n"
+
+    | <"//" (~["\n", "\r"])* ("\n" | "\r" | "\r\n")>
+}
+
+/* ===== Macros para componer expresiones regulares ===== */
+TOKEN : { < #DIGIT:  ["0"-"9"] > }
+TOKEN : { < #HEX:    ["0"-"9","a"-"f","A"-"F"] > }
+TOKEN : { < #BIN:    ["0","1"] > }
+TOKEN : { < #OCT:    ["0"-"7"] > }
+
+/* ===== Rango para letras normales y con acentos/ñ ===== */
+TOKEN : { <#LETTER : ["A"-"Z","a"-"z"] | "á" | "é" | "í" | "ó" | "ú" | "Á" | "É" | "Í" | "Ó" | "Ú" | "ñ" | "Ñ" > }
+TOKEN : { <#ID_START : <LETTER> > }
+TOKEN : { <#ID_PART  : <LETTER> | "_" | <DIGIT> > }
+
+
+/* ===== Strings ===== */
+TOKEN : { < #ESC : "\\\"" | "\\\\" | "\\n" | "\\t" | "\\r" | "\\u" <HEX> <HEX> <HEX> <HEX> > }
+
+TOKEN : {
+  < STRING :
+      "\"" ( <ESC> | ~["\"","\\","\r","\n"] )* "\""
+  >
+}
+
+/* ===== Palabras reservadas ===== */
+TOKEN : { < IF:        "if" > }
+TOKEN : { < ELIF:      "elif" > }
+TOKEN : { < ELSE:      "else" > }
+TOKEN : { < WHILE:     "while" > }
+TOKEN : { < FOR:       "for" > }
+TOKEN : { < FUNCION:   "def" > }
+TOKEN : { < RETURN:    "return" > }
+TOKEN : { < VAR:       "var" > }
+TOKEN : { < CONST:     "const" > }
+TOKEN : { < TRUE:      "true" > }
+TOKEN : { < FALSE:     "false" > }
+TOKEN : { < NULL:      "null" > }
+TOKEN : { < BREAK:     "break" > }
+TOKEN : { < CONTINUE:  "continuar" > }
+TOKEN : { < IMPORT:    "import" > }
+TOKEN : { < FROM:      "from" > }
+TOKEN : { < AS:        "as" > }
+TOKEN : { < PRINT:     "print" > }
+TOKEN : { < TRY:       "try"   > }
+TOKEN : { < CATCH:     "catch" > }
+
+/* ===== Orden Cadena (Identificadores) ===== */
+TOKEN : { <IDENT : <ID_START> (<ID_PART>)* > }
+
+/* ===== Enteros ===== */
+TOKEN : { < INT :
+            ( "0x" (<HEX>)+ ) |
+            ( "0b" (<BIN>)+ ) |
+            ( "0o" (<OCT>)+ ) |
+            ( (<DIGIT>)+ )
+        >
+}
+
+/* ===== Flotantes ===== */
+TOKEN : { < FLOAT : ( <DIGIT> )+ "." ( <DIGIT> )+ > }
+
+/* ===== Operadores aritméticos ===== */
+TOKEN : { < SUMAMAS          : "++" > }
+TOKEN : { < RESTAMENOS       : "--" > }
+TOKEN : { < SUMA             : "+"  > }
+TOKEN : { < RESTA            : "-"  > }
+TOKEN : { < MULTI            : "*"  > }
+TOKEN : { < DIV              : "/"  > }   
+TOKEN : { < MODULO           : "%"  > }
+TOKEN : { < EXCLAMACION      : "!"  > }   
+
+/* ===== Operadores de Comparación  ===== */
+TOKEN : { < IGUALIGUAL  : "==" > }
+TOKEN : { < DISTINTO    : "!=" > }
+TOKEN : { < MENORIGUAL  : "<=" > }
+TOKEN : { < MAYORIGUAL  : ">=" > }
+TOKEN : { < MENORQ      : "<"  > }
+TOKEN : { < MAYORQ      : ">"  > }
+
+/* ===== Operadores Lógicos ===== */
+TOKEN : { < AND      : "&" > }
+TOKEN : { < OR       : "|" > }
+TOKEN : { < ANDAND   : "&&" > }
+TOKEN : { < OROR     : "||" > } 
+
+/* ===== Asignaciones compuestas ===== */
+TOKEN : { < SUMAIGUAL     : "+=" > }
+TOKEN : { < RESTAIGUAL    : "-=" > }
+TOKEN : { < MULTIGUAL     : "*=" > }
+TOKEN : { < DIVIGUAL      : "/=" > }
+TOKEN : { < MODIGUAL      : "%=" > }
+TOKEN : { < IGUAL         : "="  > }
+
+
+/* =================== Delimitadores y Separadores ================ */
+
+/* ===== Paréntesis ===== */
+TOKEN : { < PARENABRE    : "(" > }
+TOKEN : { < PARENCIERRA  : ")" > }
+
+/* ===== Llaves ===== */
+TOKEN : { < LLAVEABRE    : "{" > }
+TOKEN : { < LLAVECIERRA  : "}" > }
+
+/* ===== Corchetes ===== */
+TOKEN : { < CORCHETEABRE    : "[" > }
+TOKEN : { < CORCHETECIERRA  : "]" > }
+
+/* ===== Punto y coma, coma y punto ===== */
+TOKEN : { < PUNTOCOMA    : ";" > }   
+TOKEN : { < COMA         : "," > }  
+TOKEN : { < PUNTO        : "." > }  
+
+/* ===== Operador ternario ===== */
+TOKEN : { < INTERROGACION   : "?" > }
+TOKEN : { < DOSPUNTOS       : ":" > }
+
+/* ===== Terminador de sentencia único ===== */
+TOKEN : { < FIN : "~" > }
+
+/* ===== Token para errores léxicos ===== */
+TOKEN : {
+  < INVALID : ~[] >
+}

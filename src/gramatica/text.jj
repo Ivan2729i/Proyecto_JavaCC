@@ -1,0 +1,54 @@
+options {
+  STATIC = false;              // Genera clases no estáticas
+  UNICODE_INPUT = true;        // Para poder leer UTF-8 correctamente
+  IGNORE_CASE = false;         // Para que no sea insensible a Mayus o Minus
+  TOKEN_MANAGER_USES_PARSER = false;
+}
+
+
+/* ===== Parser ===== */
+PARSER_BEGIN(Vanstor)
+public class Vanstor {
+  public static void main(String[] args) throws Exception {
+    String filename = (args.length > 0) ? args[0] : "<stdin>";
+    java.io.Reader r = (args.length > 0)
+        ? new java.io.InputStreamReader(new java.io.FileInputStream(args[0]), java.nio.charset.StandardCharsets.UTF_8)
+        : new java.io.InputStreamReader(System.in, java.nio.charset.StandardCharsets.UTF_8);
+    try {
+      Vanstor p = new Vanstor(r);
+      p.Program();
+      System.out.println("Esta muy bien: La Gramática mínima está bien escrita.");
+    } catch (TokenMgrError e) {
+      System.err.printf("%s: error léxico: %s%n", filename, e.getMessage());
+      System.exit(1);
+    }
+  }
+}
+PARSER_END(Vanstor)
+
+
+/* ===================== Gramática ======================= */
+void Program() :
+{}
+{
+  ( <STRING> | <WORD> )* <EOF>
+}
+
+
+/* ==================== Léxico ==================== */
+
+/* Espacios en blanco */
+SKIP : { " " | "\t" | "\r" | "\n" }
+
+TOKEN : { < #HEX: ["0"-"9","a"-"f","A"-"F"] > }
+
+TOKEN : { <#LETTER : ["A"-"Z","a"-"z"] | "á" | "é" | "í" | "ó" | "ú" | "Á" | "É" | "Í" | "Ó" | "Ú" | "ñ" | "Ñ" > }
+
+TOKEN : { < WORD : ( <LETTER> | ["0"-"9"] )+ > }
+
+/* String */
+TOKEN : { < #ESC : "\\\"" | "\\\\" | "\\n" | "\\t" | "\\r" | "\\u" <HEX><HEX><HEX><HEX> > }
+
+TOKEN : {
+  < STRING : "\"" ( <ESC> | ~["\"","\\","\r","\n"] )* "\"" >
+}

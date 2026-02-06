@@ -1,0 +1,125 @@
+// ================== Configuración global ==================
+
+const LIM = 5~
+const META = 80~      
+const MIN_APROB = 70~ 
+
+// Arreglo global con calificaciones iniciales
+var calificaciones = [80, 60, 90, 75, 50]~
+
+
+// ================== Funciones ==================
+
+// Calcula el promedio 
+def promedio(lista) {
+    var i = 0~
+    var suma = 0~
+
+    while (i < LIM) {
+        suma = suma + lista[i]~
+        i++~
+    }
+
+    return suma / LIM~
+}
+
+
+def maximo(lista) {
+    var i = 1~
+    var max = lista[0]~
+
+    while (i < LIM) {
+        if (lista[i] > max) {
+            max = lista[i]~
+        }
+        i++~
+    }
+
+    return max~
+}
+
+
+
+while (true) {
+    var x = 1~
+}
+
+
+
+def minimo(lista) {
+    var i = 1~
+    var min = lista[0]~
+
+    while (i < LIM) {
+        if (lista[i] < min) {
+            min = lista[i]~
+        }
+        i++~
+    }
+
+    return min~
+}
+
+
+def cuenta_aprobados(lista) {
+    var i = 0~
+    var aprobados = 0~
+
+    while (i < LIM) {
+        if (lista[i] >= MIN_APROB) {
+            aprobados = aprobados + 1~
+        }
+        i++~
+    }
+
+    return aprobados~
+}
+
+
+// ================== Reporte principal ==================
+
+def imprime_reporte_grupo(nombre_grupo, lista) {
+    var prom = promedio(lista)~
+    var max = maximo(lista)~
+    var min = minimo(lista)~
+    var aprobados = cuenta_aprobados(lista)~
+
+    print("=== REPORTE DEL GRUPO:", nombre_grupo, "===")~
+
+    // Imprime todas las calificaciones con un for
+    for (var i = 0; i < LIM; i++) {
+        print("calificaciones[", i, "] =", lista[i])~
+    }
+
+    print("Promedio:", prom)~
+    print("Máxima:", max)~
+    print("Mínima:", min)~
+    print("Aprobados:", aprobados, "de", LIM)~
+
+    if (prom >= META) {
+        print("El grupo CUMPLE la meta de promedio:", META, "con", prom)~
+    } elif (prom >= MIN_APROB) {
+        print("El grupo APRUEBA pero no llega a la meta, promedio:", prom)~
+    } else {
+        print("El grupo NO APRUEBA, promedio:", prom)~
+    }
+
+ 
+    try {
+        print("Entrando a try del reporte")~
+        prom + 1~   
+    } catch {
+        print("Algo salió mal en el reporte")~
+    }
+
+    return~
+}
+
+
+// ================== Programa “principal” ==================
+
+
+subir_calificaciones(calificaciones)~
+
+
+imprime_reporte_grupo(GRUPO_AUTOMATAS, calificaciones)~

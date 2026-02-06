@@ -1,0 +1,50 @@
+
+
+// Arreglo de arreglos (tipo “matriz”)
+var tabla = [ [1, 2], [3, 4], [5, 6] ]~
+
+
+// Función con arreglos, índices y operaciones
+def raro(a, b) {
+    var tmp = [a, b, a + b, a * b]~
+
+    print("tmp[1]:", tmp[1])~
+    // Llamada de función + indexación anidada
+    print("fabrica(3)[0] (si existiera un valor):", a)~
+    print("Ejemplo de acceso raro:", tabla[a - 1][0])~
+
+    return tmp[2]~
+}
+
+def main() {
+    // Sentencia de expresión pura
+    1 + 2 * 3 - 4~         
+
+    // Indexaciones raras pero válidas
+    print("tabla[0][1]:", tabla[0][1])~
+    print("tabla[x - 1][0]:", tabla[x - 1][0])~
+
+    // if con booleanos y comparaciones mezcladas
+    if (!(false || (x < 0 && x > 100))) {
+        print("Condición rara pero válida")~
+    }
+
+    // for con actualización por asignación en vez de i++
+    for (var i = 0; i < 10; i = i + 2) {
+        print("i raro:", i)~
+    }
+
+    // try/catch anidado dentro de un while
+    var j = 0~
+    while (j < 3) {
+        try {
+            print("Intento:", j)~
+            raro(j, j + 1)~
+        } catch {
+            print("Nunca se debería ejecutar este catch en este ejemplo")~
+        }
+        j++~
+    }
+
+    return~
+}

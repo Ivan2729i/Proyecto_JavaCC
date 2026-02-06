@@ -1,0 +1,31 @@
+#
+$
+^
+$
+
+var x = 10@~
+
+// Error sintáctico: falta "~" al final de la declaración
+var y = 20
+
+// Error sintáctico: condición numérica (Condicion no acepta solo Expresion)
+if (x + 3) {
+    print("esto está mal, la condición no es booleana")~
+}
+
+// Error sintáctico: for mal formado (falta ";" después del init)
+for (var i = 0 i < 10; i++) {
+    print("for sin punto y coma")~
+}
+
+// Error sintáctico: en este lenguaje el if SIEMPRE requiere bloque con llaves
+if (x < 10)
+    print("sin llaves")~
+
+// Error: caracter '$' no permitido en identificador
+var cont$ = 0~
+
+// Error sintáctico: try sin bloque catch
+try {
+    print("nunca se cierra con catch")~
+}
