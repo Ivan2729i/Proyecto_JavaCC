@@ -122,4 +122,4 @@ def imprime_reporte_grupo(nombre_grupo, lista) {
 subir_calificaciones(calificaciones)~
 
 
-imprime_reporte_grupo(GRUPO_AUTOMATAS, calificaciones)~
+imprime_reporte_grupo("GRUPO_AUTOMATAS", calificaciones)~

@@ -10,8 +10,308 @@ options {
 PARSER_BEGIN(Virgulilla)
 public class Virgulilla {
   public static String currentFilename = "<stdin>";
+  /* ===== Contadores de errores ===== */
   public static int lexicalErrors = 0;
   public static int syntacticErrors = 0;
+  public static int semanticErrors = 0;
+
+  /* ===== Reporte de error semántico ===== */
+  public static void semanticError(Token t, String msg) {
+    int line = (t != null ? t.beginLine : -1);
+    int col  = (t != null ? t.beginColumn : -1);
+
+    System.err.printf(
+      "%s: error semántico en línea %d, columna %d: %s%n",
+      currentFilename, line, col, msg
+    );
+    semanticErrors++;
+  }
+
+  /* ==== INICIO: COLA SIMPLE (FIFO) ==== */
+  /* Cola enlazada:
+     - offer(x): mete al final
+     - poll(): saca del inicio
+     - peek(): mira el inicio sin sacarlo
+     - size/isEmpty: utilidades 
+  */
+  static final class Queue<T> {
+    private static final class Node<T> {
+      T v;
+      Node<T> n;
+      Node(T v) { this.v = v; }
+    }
+
+    private Node<T> head, tail;
+    private int size = 0;
+
+    void offer(T x) {
+      Node<T> nn = new Node<>(x);
+      if (tail == null) {
+        head = tail = nn;
+      } else {
+        tail.n = nn;
+        tail = nn;
+      }
+      size++;
+    }
+
+    T poll() {
+      if (head == null) return null;
+      T v = head.v;
+      head = head.n;
+      if (head == null) tail = null;
+      size--;
+      return v;
+    }
+
+    T peek() {
+      return head == null ? null : head.v;
+    }
+
+    boolean isEmpty() {
+      return size == 0;
+    }
+
+    int size() {
+      return size;
+    }
+  }
+   /* ==== FIN: COLA SIMPLE (FIFO) ==== */
+
+  /* ==== INICIO: PILA (LIFO) usando 2 colas ==== */
+  static final class Stack2Q<T> {
+    private final Queue<T> q1 = new Queue<>();
+    private final Queue<T> q2 = new Queue<>();
+
+    void push(T x) {
+      q2.offer(x);
+      while (!q1.isEmpty()) {
+        q2.offer(q1.poll());
+      }
+      while (!q2.isEmpty()) {
+        q1.offer(q2.poll());
+      }
+    }
+
+    T pop() {
+      return q1.poll();
+    }
+
+    T peek() {
+      return q1.peek();
+    }
+
+    boolean isEmpty() {
+      return q1.isEmpty();
+    }
+
+    int size() {
+      return q1.size();
+    }
+  }
+  /* ==== FIN: PILA (LIFO) usando 2 colas ==== */
+
+  /* ===== Tipos de símbolo que soporta la tabla ===== */
+  enum SymKind { VAR, CONST, FUNC, PARAM }
+
+  /* ==== INICIO: INFORMACIÓN DE SÍMBOLO ==== */
+  /* Guarda la info mínima para validaciones semánticas:
+     - name: identificador
+     - kind: VAR/CONST/FUNC/PARAM
+     - declaredAt: token donde se declaró (para mensajes)
+     - arity: solo para funciones (número de parámetros)
+  */
+  static final class SymbolInfo {
+    final String name;
+    final SymKind kind;
+    final Token declaredAt;
+    final int arity; // solo aplica a FUNC. Para otros: -1
+
+    SymbolInfo(String name, SymKind kind, Token declaredAt, int arity) {
+      this.name = name;
+      this.kind = kind;
+      this.declaredAt = declaredAt;
+      this.arity = arity;
+    }
+
+    /* ===== Helpers semánticos ===== */
+    boolean isConst() { return kind == SymKind.CONST; }
+    boolean isFunc()  { return kind == SymKind.FUNC; }
+  }
+  /* ==== FIN: INFORMACIÓN DE SÍMBOLO ==== */
+
+  /* ==== INICIO: SCOPE (TABLA DE SÍMBOLOS POR ÁMBITO) ==== */
+  /* Un Scope representa un solo “nivel”:
+     - global
+     - bloque { }
+     - función
+     - for (header)
+  */
+  static final class Scope {
+    private final java.util.HashMap<String, SymbolInfo> table = new java.util.HashMap<>();
+
+    /* ===== ¿Existe aquí mismo? (para redeclaración) ===== */
+    boolean containsHere(String name) {
+      return table.containsKey(name);
+    }
+
+    /* ===== Obtener solo en este scope ===== */
+    SymbolInfo getHere(String name) {
+      return table.get(name);
+    }
+
+    /* ===== Insertar símbolo en este scope ===== */
+    void putHere(String name, SymbolInfo info) {
+      table.put(name, info);
+    }
+  }
+  /* ==== FIN: SCOPE (TABLA DE SÍMBOLOS POR ÁMBITO) ==== */
+
+  /* ==== INICIO: MANEJADOR DE ÁMBITOS (PILA + BÚSQUEDA) ==== */
+  /**
+   * Maneja la pila de ámbitos con Stack2Q.
+   * Nota importante:
+   * - Como Stack2Q no permite iterar fácil,
+   *   mantenemos un "mirror" (lista espejo) para poder buscar desde el scope más interno.
+   * - scopeStack: estructura pedida (pila real).
+   * - mirror: facilita resolve() (búsqueda de símbolos).
+   */
+  final class ScopeManager {
+    private final Stack2Q<Scope> scopeStack = new Stack2Q<>();
+    private final java.util.ArrayList<Scope> mirror = new java.util.ArrayList<>();
+
+    /* ===== Entrar a un nuevo ámbito ===== */
+    void enterScope() {
+      Scope s = new Scope();
+      scopeStack.push(s);
+      mirror.add(s);
+    }
+
+    /* ===== Salir del ámbito actual ===== */
+    void exitScope(Token where) {
+      Scope popped = scopeStack.pop();
+      if (popped == null) {
+        semanticError(where, "Se intentó cerrar un ámbito pero no hay ámbitos activos.");
+        return;
+      }
+      /* Mantener sincronizado el espejo */
+      if (!mirror.isEmpty()) {
+        mirror.remove(mirror.size() - 1);
+      }
+    }
+
+    /* ===== Scope actual (tope de la pila) ===== */
+    private Scope current(Token where) {
+      Scope s = scopeStack.peek();
+      if (s == null) {
+        semanticError(where, "No hay ámbito activo (scope stack vacío).");
+      }
+      return s;
+    }
+
+    /* ===== Declarar símbolo normal (VAR/CONST/PARAM) ===== */
+    void declare(Token idTok, SymKind kind) {
+      declareWithArity(idTok, kind, -1);
+    }
+
+    /* ===== Declarar función (FUNC) con aridad ===== */
+    void declareFunc(Token idTok, int arity) {
+      declareWithArity(idTok, SymKind.FUNC, arity);
+    }
+
+    /* ===== Implementación común de declaración ===== */
+    private void declareWithArity(Token idTok, SymKind kind, int arity) {
+      Scope cur = current(idTok);
+      if (cur == null) return;
+
+      String name = idTok.image;
+
+      if (cur.containsHere(name)) {
+        SymbolInfo prev = cur.getHere(name);
+        semanticError(idTok,
+          "Redeclaración de '" + name + "'. Ya declarado en línea " +
+          prev.declaredAt.beginLine + ", columna " + prev.declaredAt.beginColumn + "."
+        );
+        return;
+      }
+      /* Inserción en la tabla del scope actual */
+      cur.putHere(name, new SymbolInfo(name, kind, idTok, arity));
+    }
+
+    /* ===== Resolver: buscar símbolo desde el scope más interno hacia fuera ===== */
+    SymbolInfo resolve(Token idTok) {
+      String name = idTok.image;
+
+      /* Buscar desde el final (scope más interno) hacia el inicio (global) */
+      for (int i = mirror.size() - 1; i >= 0; i--) {
+        SymbolInfo info = mirror.get(i).getHere(name);
+        if (info != null) {
+          if (isInitializing(idTok)) {
+            semanticError(idTok, "No se puede usar '" + name + "' dentro de su propia inicialización.");
+          }
+          return info;
+        }
+      }
+
+      semanticError(idTok, "Uso de '" + name + "' pero no está declarado.");
+      return null;
+    }
+  }
+  /* ==== FIN: MANEJADOR DE ÁMBITOS (PILA + BÚSQUEDA) ==== */
+
+  /* ===== Instancia del manejador de ámbitos (vive por parser, no es stático) ===== */
+  private final ScopeManager scopes = new ScopeManager();
+
+  /* ==== INICIO: CONTADORES DE CONTEXTO (ciclos y funciones) ==== */
+  /* loopDepth:
+     - Se incrementa al entrar a un for/while
+     - Se decrementa al salir
+     - Sirve para validar break/continuar
+  */
+  private int loopDepth = 0;  // >0 significa que estamos dentro de un for/while
+  /* funcDepth:
+     - Se incrementa al entrar a una función
+     - Se decrementa al salir
+     - Sirve para validar return
+  */
+  private int funcDepth = 0;  // >0 significa que estamos dentro de una función
+
+  /* ===== Helpers: ciclo ===== */
+  private void enterLoop() { loopDepth++; }
+  private void exitLoop()  { if (loopDepth > 0) loopDepth--; }
+  private boolean inLoop() { return loopDepth > 0; }
+
+  /* ===== Helpers: función ===== */
+  private void enterFunc() { funcDepth++; }
+  private void exitFunc()  { if (funcDepth > 0) funcDepth--; }
+  private boolean inFunc() { return funcDepth > 0; }
+  /* ==== FIN: CONTADORES DE CONTEXTO (ciclos y funciones) ==== */
+
+  /* ==== INICIO: BLOQUEO DE “AUTO-INICIALIZACIÓN” ==== */
+  private final java.util.HashSet<String> initializing = new java.util.HashSet<>();
+
+  /* ===== Marcar inicio de inicialización ===== */
+  private void beginInit(Token id) { initializing.add(id.image); }
+  /* ===== Marcar fin de inicialización ===== */
+  private void endInit(Token id)   { initializing.remove(id.image); }
+  /* ===== Está en inicialización ===== */
+  private boolean isInitializing(Token id) { return initializing.contains(id.image); }
+  /* ==== FIN: BLOQUEO DE “AUTO-INICIALIZACIÓN” ==== */
+
+  /* ==== INICIO: VALIDACIÓN DE PARÁMETROS DUPLICADOS ==== */
+  private void validateNoDuplicateParams(java.util.ArrayList<Token> params, Token funcName) {
+    java.util.HashSet<String> seen = new java.util.HashSet<>();
+    for (Token p : params) {
+      String name = p.image;
+      if (seen.contains(name)) {
+        semanticError(p, "Parámetro duplicado '" + name + "' en la función '" + funcName.image + "'.");
+      } else {
+        seen.add(name);
+      }
+    }
+  }
+  /* ==== FIN: VALIDACIÓN DE PARÁMETROS DUPLICADOS ==== */
+
 
   public static void main(String[] args) throws Exception {
     String filename = (args.length > 0) ? args[0] : "<stdin>";
@@ -36,12 +336,12 @@ public class Virgulilla {
       syntacticErrors++;
     }
 
-    if (lexicalErrors == 0 && syntacticErrors == 0) {
-      System.out.println("Esta muy bien: La Gramática mínima esta bien escrita.");
+    if (lexicalErrors == 0 && syntacticErrors == 0 && semanticErrors == 0) {
+      System.out.println("Esta muy bien: Léxico, sintaxis y semántica sin errores.");
     } else {
       System.err.printf(
-        "%s: se encontraron %d errores léxicos y %d error sintáctico en el archivo.%n",
-        filename, lexicalErrors, syntacticErrors
+        "%s: se encontraron %d errores léxicos, %d errores sintácticos y %d errores semánticos.%n",
+        filename, lexicalErrors, syntacticErrors, semanticErrors
       );
     }
   }
@@ -55,6 +355,9 @@ PARSER_END(Virgulilla)
 void Program() :
 { Token bad; }
 {
+  {
+    scopes.enterScope(); // ámbito global
+  }
   (
     Statement()
   | bad=<INVALID> {
@@ -69,9 +372,10 @@ void Program() :
     }
   )*
   <EOF>
+  {
+    scopes.exitScope(token); // cerrar global
+  }
 }
-
-
 
 /* ===================== Definiciones sintácticas ======================= */
 
@@ -81,15 +385,18 @@ void Program() :
 void Statement() :
 {}
 {
-      VarDecl() <FIN> | Print() <FIN> | BreakC() <FIN> | ContinueC() <FIN> | ReturnC() <FIN> | LOOKAHEAD( IncDecSimple() ) IncDecSimple() <FIN> | LOOKAHEAD( Assignment() ) Assignment() <FIN> 
-      | ExprStatement() <FIN> | IfCond() | WhileC() | ForC() | TryCatch() | FuncDef() | Block()
+      VarDecl() <FIN> | Print() <FIN> | BreakC() <FIN> | ContinueC() <FIN> | ReturnC() <FIN> | LOOKAHEAD( IncDecSimple() ) IncDecSimple() <FIN> | LOOKAHEAD( AssignmentCompound() ) AssignmentCompound() <FIN>
+    | LOOKAHEAD( Assignment() ) Assignment() <FIN> | ExprStatement() <FIN> | IfCond() | WhileC() | ForC() | TryCatch() | FuncDef() | Block()
 }
 
 /* ===== Definir bloques ===== */
 void Block() :
 {}
 {
-    <LLAVEABRE> ( Statement() )+ <LLAVECIERRA>
+    <LLAVEABRE>
+    { scopes.enterScope(); }
+    ( Statement() )+ <LLAVECIERRA>
+    { scopes.exitScope(token); }
 }
 
 /* ===== Condición booleana general ===== */
@@ -110,7 +417,7 @@ void Print() :
 void PrintArg() :
 {}
 {
-      Expresion() | <STRING>
+    Expresion()
 }
 
 /* ===== Sentencia try/catch ===== */
@@ -127,16 +434,49 @@ void TryCatch() :
 
 /* ===== Declaración de variable o constante ===== */
 void VarDecl() :
-{}
+{ Token id; Token kw; }
 {
-    ( <VAR> | <CONST> ) <IDENT> <IGUAL> Expresion()
+    ( kw=<VAR> | kw=<CONST> )
+    id=<IDENT>
+    {
+      scopes.declare(id, (kw.kind == VAR ? SymKind.VAR : SymKind.CONST));
+      beginInit(id);
+    }
+    <IGUAL>
+    Expresion()
+    {
+      endInit(id);
+    }
 }
 
 /* ===== ReAsignación simple ===== */
 void Assignment() :
-{}
+{ Token id; SymbolInfo info; }
 {
-    <IDENT> <IGUAL> Expresion()
+    id=<IDENT>
+    <IGUAL>
+    Expresion()
+    {
+      info = scopes.resolve(id);
+      if (info != null && info.isConst()) {
+        semanticError(id, "No se puede reasignar la constante '" + id.image + "'.");
+      }
+    }
+}
+
+/* ===== Asignación compuesta ===== */
+void AssignmentCompound() :
+{ Token id; Token op; SymbolInfo info; }
+{
+    id=<IDENT>
+    ( op=<SUMAIGUAL> | op=<RESTAIGUAL> | op=<MULTIGUAL> | op=<DIVIGUAL> | op=<MODIGUAL> )
+    Expresion()
+    {
+      info = scopes.resolve(id);
+      if (info != null && info.isConst()) {
+        semanticError(id, "No se puede aplicar '" + op.image + "' a la constante '" + id.image + "'.");
+      }
+    }
 }
 
 /* ===== Sentencia de expresión: una expresión sola con "~" ===== */
@@ -164,14 +504,30 @@ void Term() :
 void Factor() :
 {}
 {
-    SignoNumerico() | Indexable() | ArrayLiteral()
+     Literal() | SignoNumerico() | Indexable() | ArrayLiteral()
+}
+
+/** ===== Literal: strings o bool ===== */
+void Literal() :
+{}
+{
+      <STRING> | <TRUE> | <FALSE> | <NULL>
 }
 
 /** ===== Indexable: IDENT o llamada, con cero o más índices [expr] ===== */
 void Indexable() :
-{}
+{ boolean called; int idxCount = 0; }
 {
-    IdentOrCall() ( <CORCHETEABRE> Expresion() <CORCHETECIERRA> )*
+    called=IdentOrCall()
+    (
+      <CORCHETEABRE> Expresion() <CORCHETECIERRA>
+      { idxCount++; }
+    )*
+    {
+      if (called && idxCount > 0) {
+        semanticError(token, "No se permite indexar el resultado de una llamada (ej: f()[0]) sin sistema de tipos.");
+      }
+    }
 }
 
 /** ===== ArrayList: [ expr, expr, ... ] puede estar vacío ===== */
@@ -225,14 +581,31 @@ void NotExpr() :
 void BoolAtom() :
 {}
 {
-      <TRUE> | <FALSE> | LOOKAHEAD( Relacional() ) Relacional() | <PARENABRE> Condicion() <PARENCIERRA>
+      LOOKAHEAD(3, RelacionalStart() ) Relacional()
+    | <TRUE>
+    | <FALSE>
+    | <PARENABRE> Condicion() <PARENCIERRA>
+}
+
+/* ===== Operadores básicos booleanos ===== */
+void RelOp() :
+{}
+{
+    <IGUALIGUAL> | <DISTINTO> | <MENORQ> | <MAYORQ> | <MENORIGUAL> | <MAYORIGUAL>
+}
+
+* ===== Predicción de relacional (solo para LOOKAHEAD) ===== */
+void RelacionalStart() :
+{}
+{
+    Expresion() RelOp()
 }
 
 /* ===== Comparaciones: x < 10, x == y, etc. ===== */
 void Relacional() :
 {}
 {
-    Expresion() ( <IGUALIGUAL> | <DISTINTO> | <MENORQ> | <MAYORQ> | <MENORIGUAL> | <MAYORIGUAL> ) Expresion() 
+    Expresion() RelOp() Expresion()
 }
 
 /* =================== FIN: Booleanos =================== */
@@ -266,42 +639,94 @@ void RestoIf() :
 void WhileC() :
 {}
 {
-    <WHILE> <PARENABRE> Condicion() <PARENCIERRA> Block()
+    <WHILE> <PARENABRE> Condicion() <PARENCIERRA>
+    {
+      enterLoop();
+    }
+    Block()
+    {
+      exitLoop();
+    }
 }
 
 /* ===== Sentencia break ===== */
 void BreakC() :
-{}
+{ Token b; }
 {
-    <BREAK>
+    b=<BREAK>
+    {
+      if (!inLoop()) {
+        semanticError(b, "Uso de 'break' fuera de un ciclo (for/while).");
+      }
+    }
 }
 
 /* ===== Sentencia continue ===== */
 void ContinueC() :
-{}
+{ Token c; }
 {
-    <CONTINUE>
+    c=<CONTINUE>
+    {
+      if (!inLoop()) {
+        semanticError(c, "Uso de 'continuar' fuera de un ciclo (for/while).");
+      }
+    }
 }
 
 /* ===== Incremento-Decremento: i++ i-- ===== */
 void IncDecSimple() :
-{}
+{ Token id; SymbolInfo info; }
 {
-    <IDENT> ( <SUMAMAS> | <RESTAMENOS> )
+    id=<IDENT> ( <SUMAMAS> | <RESTAMENOS> )
+    {
+      info = scopes.resolve(id);
+      if (info != null && info.isConst()) {
+        semanticError(id, "No se puede incrementar/decrementar la constante '" + id.image + "'.");
+      }
+    }
 }
 
 /* ===== Declaración sin FIN (para el for) ===== */
 void VarDeclNoFin() :
-{}
+{ Token id; Token kw; }
 {
-    ( <VAR> | <CONST> ) <IDENT> <IGUAL> Expresion()
+    ( kw=<VAR> | kw=<CONST> )
+    id=<IDENT>
+    <IGUAL>
+    Expresion()
+    {
+      scopes.declare(id, (kw.kind == VAR ? SymKind.VAR : SymKind.CONST));
+    }
 }
 
 /* ===== Asignación sin FIN (para el for) ===== */
 void AssignmentNoFin() :
-{}
+{ Token id; SymbolInfo info; }
 {
-    <IDENT> <IGUAL> Expresion()
+    id=<IDENT>
+    <IGUAL>
+    Expresion()
+    {
+      info = scopes.resolve(id);
+      if (info != null && info.isConst()) {
+        semanticError(id, "No se puede reasignar la constante '" + id.image + "'.");
+      }
+    }
+}
+
+/* ===== Asignaión Compuesta (para el for) sin FIN ===== */
+void AssignmentCompoundNoFin() :
+{ Token id; Token op; SymbolInfo info; }
+{
+    id=<IDENT>
+    ( op=<SUMAIGUAL> | op=<RESTAIGUAL> | op=<MULTIGUAL> | op=<DIVIGUAL> | op=<MODIGUAL> )
+    Expresion()
+    {
+      info = scopes.resolve(id);
+      if (info != null && info.isConst()) {
+        semanticError(id, "No se puede aplicar '" + op.image + "' a la constante '" + id.image + "'.");
+      }
+    }
 }
 
 /* ===== Inicialización del for: var/const o asignación simple ===== */
@@ -315,14 +740,27 @@ void ForInit() :
 void ForUpdate() :
 {}
 {
-      LOOKAHEAD( IncDecSimple() ) IncDecSimple() | AssignmentNoFin()
+      LOOKAHEAD( IncDecSimple() ) IncDecSimple()
+    | LOOKAHEAD( AssignmentCompoundNoFin() ) AssignmentCompoundNoFin() | AssignmentNoFin()
 }
 
 /* ===== Sentencia for ===== */
 void ForC() :
 {}
 {
-    <FOR> <PARENABRE> ForInit() <PUNTOCOMA> Condicion() <PUNTOCOMA> ForUpdate() <PARENCIERRA> Block()
+    <FOR>
+    {
+      scopes.enterScope();
+      enterLoop();
+    }
+    <PARENABRE>
+      ForInit() <PUNTOCOMA> Condicion() <PUNTOCOMA> ForUpdate()
+    <PARENCIERRA>
+    Block()
+    {
+      exitLoop();
+      scopes.exitScope(token); // cerrar scope del for
+    }
 }
 
 /* =================== FIN : Ciclos =================== */
@@ -332,37 +770,109 @@ void ForC() :
 
 /* ===== Sentencia return ===== */
 void ReturnC() :
-{}
+{ Token r; }
 {
-    <RETURN> ( Expresion() )?
+    r=<RETURN> ( Expresion() )?
+    {
+      if (!inFunc()) {
+        semanticError(r, "Uso de 'return' fuera de una función.");
+      }
+    }
 }
 
 /* ===== Lista de parámetros de la función ===== */
-void ParamDef() :
+java.util.ArrayList<Token> ParamDef() :
+{ Token id; java.util.ArrayList<Token> params = new java.util.ArrayList<>(); }
+{
+    id=<IDENT> { params.add(id); }
+    ( <COMA> id=<IDENT> { params.add(id); } )*
+    { return params; }
+}
+
+/* ===== Bloque de función ===== */
+void FuncBlock(java.util.ArrayList<Token> params) :
 {}
 {
-    <IDENT> ( <COMA> <IDENT> )*
+    <LLAVEABRE>
+    {
+      scopes.enterScope();
+
+      // Declarar parámetros como símbolos del scope de la función, evita duplicar errores
+      java.util.HashSet<String> seenP = new java.util.HashSet<>();
+      for (Token p : params) {
+        if (seenP.add(p.image)) {
+          scopes.declare(p, SymKind.PARAM);
+        }
+      }
+    }
+    ( Statement() )+
+    <LLAVECIERRA>
+    {
+      scopes.exitScope(token);
+    }
 }
 
 /* ===== Sentencia función ===== */
 void FuncDef() :
-{}
+{ Token name; java.util.ArrayList<Token> params = new java.util.ArrayList<>(); }
 {
-    <FUNCION> <IDENT> <PARENABRE> ( ParamDef() )? <PARENCIERRA> Block()
+    <FUNCION> name=<IDENT>
+    <PARENABRE> ( params=ParamDef() )? <PARENCIERRA>
+    {
+      // Validar params duplicados (sin detener el parseo)
+      validateNoDuplicateParams(params, name);
+
+      // Registrar función con aridad
+      scopes.declareFunc(name, params.size());
+      enterFunc();
+    }
+    FuncBlock(params)
+    {
+      exitFunc();
+    }
 }
 
 /* ===== Lista de argumentos en una llamada ===== */
-void ArgList() :
-{}
+int ArgList() :
+{ int n = 0; }
 {
-    Expresion() ( <COMA> Expresion() )*
+    Expresion() { n = 1; }
+    ( <COMA> Expresion() { n++; } )*
+    { return n; }
 }
 
 /* ===== Identificador solo o llamada a función ===== */
-void IdentOrCall() :
-{}
+boolean IdentOrCall() :
+{ Token id; boolean isCall = false; int argc = 0; SymbolInfo info; }
 {
-    <IDENT> (<PARENABRE> ( ArgList() )? <PARENCIERRA> )?
+    id=<IDENT>
+    (
+      <PARENABRE>
+      {
+        isCall = true;
+      }
+      ( argc=ArgList() )?
+      <PARENCIERRA>
+    )?
+    {
+      info = scopes.resolve(id);
+      if (info != null) {
+        if (isCall) {
+          if (!info.isFunc()) {
+            semanticError(id, "'" + id.image + "' no es una función (no se puede llamar con ()).");
+          } else if (info.arity != argc) {
+            semanticError(id,
+              "Llamada a '" + id.image + "' con " + argc + " argumento(s), pero requiere " + info.arity + "."
+            );
+          }
+        } else {
+          if (info.isFunc()) {
+            semanticError(id, "La función '" + id.image + "' debe llamarse con paréntesis: " + id.image + "(...).");
+          }
+        }
+      }
+      return isCall;
+    }
 }
 
 /* =================== FIN : Funciones =================== */
