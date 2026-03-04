@@ -16,7 +16,9 @@ public class Virgulilla {
   public static int semanticErrors = 0;
 
   /* ===== Reporte de error semántico ===== */
-  public static void semanticError(Token t, String msg) {
+  public void semanticError(Token t, String msg) {
+    if (inSafeStatement && stmtHadSyntaxError) return;
+
     int line = (t != null ? t.beginLine : -1);
     int col  = (t != null ? t.beginColumn : -1);
 
@@ -26,6 +28,207 @@ public class Virgulilla {
     );
     semanticErrors++;
   }
+
+
+  // ===== Anti-spam sintáctico (último error reportado) =====
+  private int lastSynLine = -999;
+  private int lastSynCol  = -999;
+  private String lastSynTok = "";
+
+  // ===== Estado por-sentencia para evitar cascada =====
+  private boolean stmtHadSyntaxError = false;   
+  private boolean inSafeStatement = false;
+
+  // ===== Anti-spam semántico para typos de keywords =====
+  private final java.util.HashSet<String> typoKeywords = new java.util.HashSet<>();
+
+  private boolean isStrongStatementStarter(int kind) {
+    return kind == VAR || kind == CONST || kind == FUNCION || kind == IF || kind == ELIF || kind == ELSE ||
+          kind == WHILE || kind == FOR || kind == TRY || kind == PRINT || kind == RETURN ||
+          kind == BREAK || kind == CONTINUE || kind == LLAVEABRE;
+  }     
+  
+
+  private boolean expectedContains(ParseException e, int kind) {
+    if (e == null || e.expectedTokenSequences == null) return false;
+    for (int[] seq : e.expectedTokenSequences) {
+      if (seq == null) continue;
+      for (int k : seq) if (k == kind) return true;
+    }
+    return false;
+  }
+
+  private boolean isStatementStarter(int kind) {
+    return kind == VAR || kind == CONST || kind == FUNCION || kind == IF || kind == ELIF || kind == ELSE ||
+          kind == WHILE || kind == FOR || kind == TRY || kind == PRINT || kind == RETURN ||
+          kind == BREAK || kind == CONTINUE || kind == IDENT || kind == LLAVEABRE;
+  }
+  
+  /* ===== Reporte de error sintáctico ===== */
+  private void syntacticError(ParseException e) {
+    Token culprit = (token != null && token.next != null) ? token.next : getToken(1);
+
+    int line = (culprit != null ? culprit.beginLine : -1);
+    int col  = (culprit != null ? culprit.beginColumn : -1);
+    String got = (culprit != null ? culprit.image : "<null>");
+
+    if (expectedContains(e, FIN) && culprit != null && isStrongStatementStarter(culprit.kind)) {
+      int l = (token != null ? token.endLine : line);
+      int c = (token != null ? token.endColumn : col);
+
+      System.err.printf(
+        "%s: error sintáctico en línea %d, columna %d: falta \"~\" antes de \"%s\"%n",
+        currentFilename, l, c, got
+      );
+      syntacticErrors++;
+      return;
+    }
+
+    // Anti-spam
+    if (line == lastSynLine && col == lastSynCol && java.util.Objects.equals(got, lastSynTok)) {
+      return;
+    }
+
+    lastSynLine = line;
+    lastSynCol  = col;
+    lastSynTok  = got;
+
+    System.err.printf(
+      "%s: error sintáctico en línea %d, columna %d: cerca de \"%s\"%n",
+      currentFilename, line, col, got
+    );
+    syntacticErrors++;
+  }
+
+  /* ===== Modo pánico: saltar tokens hasta un punto seguro =====
+     Sync points de tu lenguaje:
+     - FIN "~"  (terminador de sentencia)
+     - LLAVECIERRA "}" (fin de bloque)
+     - EOF
+  */
+  private void panicRecover() {
+    Token start = getToken(1);
+    Token t = start;
+
+    while (t.kind != FIN && t.kind != LLAVECIERRA && t.kind != EOF) {
+
+      // si vemos que YA empieza otra sentencia detenemos para que SafeStatement() vuelva a intentar parsear desde ahí.
+      if (isStrongStatementStarter(t.kind)) {
+        break;
+      }
+
+      getNextToken();
+      t = getToken(1);
+    }
+
+    // Si llegamos a FIN o }, sí lo consumimos para no quedarnos atorados
+    if (t.kind == FIN || t.kind == LLAVECIERRA) {
+      getNextToken();
+    }
+
+    // Anti-loop: si no avanzamos nada, consume 1 token
+    int sl = start.beginLine, sc = start.beginColumn;
+    Token after = getToken(1);
+    if (after.kind != EOF && after.beginLine == sl && after.beginColumn == sc) {
+      getNextToken();
+    }
+  }
+
+  /* ===== Reporte de error léxico (INVALID) ===== */
+  private void lexicalError(Token bad) {
+    System.err.printf(
+      "%s: error léxico en línea %d, columna %d: símbolo no reconocido \"%s\"%n",
+      currentFilename, bad.beginLine, bad.beginColumn, bad.image
+    );
+    lexicalErrors++;
+  }
+
+  // ================== SUGERENCIA DE KEYWORDS ==================
+
+  // keywords
+  private static final String[] KEYWORDS = {
+    "if","elif","else","while","for","def","try","catch",
+    "return","break","continuar","print","var","const"
+  };
+
+  // Levenshtein con corte
+  private int editDistanceUpTo2(String a, String b) {
+    if (a == null || b == null) return 99;
+    a = a.trim();
+    b = b.trim();
+    int n = a.length(), m = b.length();
+    if (Math.abs(n - m) > 2) return 99;
+
+    int[] prev = new int[m + 1];
+    int[] cur  = new int[m + 1];
+    for (int j = 0; j <= m; j++) prev[j] = j;
+
+    for (int i = 1; i <= n; i++) {
+      cur[0] = i;
+      int bestRow = cur[0];
+
+      char ca = a.charAt(i - 1);
+      for (int j = 1; j <= m; j++) {
+        int cost = (ca == b.charAt(j - 1)) ? 0 : 1;
+        int del  = prev[j] + 1;
+        int ins  = cur[j - 1] + 1;
+        int sub  = prev[j - 1] + cost;
+        int v = Math.min(Math.min(del, ins), sub);
+        cur[j] = v;
+        if (v < bestRow) bestRow = v;
+      }
+
+      if (bestRow > 2) return 99;
+      int[] tmp = prev; prev = cur; cur = tmp;
+    }
+    return prev[m];
+  }
+
+  private String nearestKeyword(String s) {
+    String best = null;
+    int bestD = 99;
+
+    for (String kw : KEYWORDS) {
+      int d = editDistanceUpTo2(s, kw);
+
+      if (d < bestD) {
+        bestD = d;
+        best = kw;
+        continue;
+      }
+
+      // DESEMPATE: si tienen la misma distancia, decide mejor
+      if (d == bestD && best != null) {
+        char s0 = (s != null && !s.isEmpty()) ? s.charAt(0) : 0;
+        boolean kwSame0   = (!kw.isEmpty()   && kw.charAt(0)   == s0);
+        boolean bestSame0 = (!best.isEmpty() && best.charAt(0) == s0);
+
+        // Preferir keyword que empiece igual que el typo
+        if (kwSame0 && !bestSame0) {
+          best = kw;
+        }
+        // Si ambos o ninguno empiezan igual, preferir la más larga (ej: def > if)
+        else if (kwSame0 == bestSame0) {
+          if (kw.length() > best.length()) best = kw;
+        }
+      }
+    }
+
+    return (bestD <= 2) ? best : null;
+  }
+
+  // Reporte sintáctico para typos
+  private void keywordTypoError(Token idTok, String suggestion) {
+    if (idTok == null || suggestion == null) return;
+
+    System.err.printf(
+      "%s: error sintáctico en línea %d, columna %d: palabra reservada mal escrita \"%s\" ¿quisiste decir \"%s\"?%n",
+      currentFilename, idTok.beginLine, idTok.beginColumn, idTok.image, suggestion
+    );
+    syntacticErrors++;
+  }
+
+
 
   /* ==== INICIO: COLA SIMPLE (FIFO) ==== */
   /* Cola enlazada:
@@ -78,7 +281,8 @@ public class Virgulilla {
   }
    /* ==== FIN: COLA SIMPLE (FIFO) ==== */
 
-  /* ==== INICIO: PILA (LIFO) usando 2 colas ==== */
+
+  /* ==== INICIO: PILA AMBITOS (LIFO) usando 2 colas ==== */
   static final class Stack2Q<T> {
     private final Queue<T> q1 = new Queue<>();
     private final Queue<T> q2 = new Queue<>();
@@ -109,10 +313,84 @@ public class Virgulilla {
       return q1.size();
     }
   }
-  /* ==== FIN: PILA (LIFO) usando 2 colas ==== */
+  /* ==== FIN: PILA AMBITOS (LIFO) usando 2 colas ==== */
+
+
+  /* ==== INICIO: PILA SEMÁNTICA (TIPOS) ==== */
+  private final java.util.Stack<VType> semStack = new java.util.Stack<>();
+  private void pushVType(VType t) { semStack.push(t); }
+
+  private VType popVType(Token at) {
+    if (semStack.isEmpty()) {
+      semanticError(at, "Pila semántica vacía (pop sin push).");
+      return VType.ERROR;
+    }
+    return semStack.pop();
+  }
+
+  private boolean isNumeric(VType t) { return t != null && t.isNumeric(); }
+  private boolean isBool(VType t)    { return t != null && t.isBool(); }
+
+  private boolean canAssign(VType to, VType from) {
+    if (to.k == VType.K.ERROR || from.k == VType.K.ERROR) return true;
+    if (to.k == VType.K.UNKNOWN || from.k == VType.K.UNKNOWN) return true;
+    if (to.k == from.k) return true;
+    return (to.k == VType.K.FLOAT && from.k == VType.K.INT);
+  }
+
+  private VType promoteNumeric(VType a, VType b) {
+    if (a.k == VType.K.ERROR || b.k == VType.K.ERROR) return VType.ERROR;
+    if (a.k == VType.K.UNKNOWN || b.k == VType.K.UNKNOWN) return VType.UNKNOWN;
+    if (a.k == VType.K.FLOAT || b.k == VType.K.FLOAT) return VType.FLOAT;
+    return VType.INT;
+  }
+
+  private VType unifyArrayElem(VType a, VType b, Token at) {
+    if (a.k == VType.K.ERROR || b.k == VType.K.ERROR) return VType.ERROR;
+    if (a.k == VType.K.UNKNOWN) return b;
+    if (b.k == VType.K.UNKNOWN) return a;
+
+    if (a.isNumeric() && b.isNumeric()) {
+      return (a.k == VType.K.FLOAT || b.k == VType.K.FLOAT) ? VType.FLOAT : VType.INT;
+    }
+
+    if (a.k == b.k) return a;
+
+    semanticError(at, "Arreglo con tipos mezclados: " + a + " y " + b + ".");
+    return VType.ERROR;
+  }
+  /* ==== FIN: PILA SEMÁNTICA (TIPOS) ==== */
+
 
   /* ===== Tipos de símbolo que soporta la tabla ===== */
   enum SymKind { VAR, CONST, FUNC, PARAM }
+
+  /* ===== Tipos semánticos mínimos ===== */
+  static final class VType {
+  enum K { INT, FLOAT, BOOL, STRING, NULL, ARRAY, UNKNOWN, ERROR }
+  final K k;
+  final VType elem; // solo aplica si k == ARRAY
+
+  private VType(K k, VType elem) { this.k = k; this.elem = elem; }
+
+  static final VType INT    = new VType(K.INT, null);
+  static final VType FLOAT  = new VType(K.FLOAT, null);
+  static final VType BOOL   = new VType(K.BOOL, null);
+  static final VType STRING = new VType(K.STRING, null);
+  static final VType NULL   = new VType(K.NULL, null);
+  static final VType UNKNOWN= new VType(K.UNKNOWN, null);
+  static final VType ERROR  = new VType(K.ERROR, null);
+
+  static VType arrayOf(VType elem) { return new VType(K.ARRAY, elem); }
+
+  boolean isNumeric() { return k == K.INT || k == K.FLOAT; }
+  boolean isBool()    { return k == K.BOOL; }
+
+  @Override public String toString() {
+    if (k != K.ARRAY) return k.name();
+    return "ARRAY<" + (elem == null ? "?" : elem.toString()) + ">";
+  }
+}
 
   /* ==== INICIO: INFORMACIÓN DE SÍMBOLO ==== */
   /* Guarda la info mínima para validaciones semánticas:
@@ -124,12 +402,14 @@ public class Virgulilla {
   static final class SymbolInfo {
     final String name;
     final SymKind kind;
+    final VType type; 
     final Token declaredAt;
-    final int arity; // solo aplica a FUNC. Para otros: -1
+    final int arity; 
 
-    SymbolInfo(String name, SymKind kind, Token declaredAt, int arity) {
+    SymbolInfo(String name, SymKind kind, VType type, Token declaredAt, int arity) {
       this.name = name;
       this.kind = kind;
+      this.type = type;
       this.declaredAt = declaredAt;
       this.arity = arity;
     }
@@ -219,6 +499,34 @@ public class Virgulilla {
       declareWithArity(idTok, SymKind.FUNC, arity);
     }
 
+    /* ===== Declarar símbolo con tipo (VAR/CONST/PARAM) ===== */
+    void declareTyped(Token idTok, SymKind kind, VType type) {
+      declareWithArityTyped(idTok, kind, type, -1);
+    }
+
+    /* ===== Declarar función con tipo de retorno ===== */
+    void declareFuncTyped(Token idTok, int arity, VType returnType) {
+      declareWithArityTyped(idTok, SymKind.FUNC, returnType, arity);
+    }
+
+    private void declareWithArityTyped(Token idTok, SymKind kind, VType type, int arity) {
+      Scope cur = current(idTok);
+      if (cur == null) return;
+
+      String name = idTok.image;
+
+      if (cur.containsHere(name)) {
+        SymbolInfo prev = cur.getHere(name);
+        semanticError(idTok,
+          "Redeclaración de '" + name + "'. Ya declarado en línea " +
+          prev.declaredAt.beginLine + ", columna " + prev.declaredAt.beginColumn + "."
+        );
+        return;
+      }
+
+      cur.putHere(name, new SymbolInfo(name, kind, type, idTok, arity));
+    }
+
     /* ===== Implementación común de declaración ===== */
     private void declareWithArity(Token idTok, SymKind kind, int arity) {
       Scope cur = current(idTok);
@@ -235,7 +543,7 @@ public class Virgulilla {
         return;
       }
       /* Inserción en la tabla del scope actual */
-      cur.putHere(name, new SymbolInfo(name, kind, idTok, arity));
+      cur.putHere(name, new SymbolInfo(name, kind, VType.UNKNOWN, idTok, arity));
     }
 
     /* ===== Resolver: buscar símbolo desde el scope más interno hacia fuera ===== */
@@ -253,13 +561,18 @@ public class Virgulilla {
         }
       }
 
+      // Si ya se reportó como palabra reservada mal escrita, no spamear no declarado
+      if (typoKeywords.contains(name)) {
+        return null;
+      }
+
       semanticError(idTok, "Uso de '" + name + "' pero no está declarado.");
       return null;
     }
   }
   /* ==== FIN: MANEJADOR DE ÁMBITOS (PILA + BÚSQUEDA) ==== */
 
-  /* ===== Instancia del manejador de ámbitos (vive por parser, no es stático) ===== */
+  /* ===== Instancia del manejador de ámbitos (vive por parser, no es rstático) ===== */
   private final ScopeManager scopes = new ScopeManager();
 
   /* ==== INICIO: CONTADORES DE CONTEXTO (ciclos y funciones) ==== */
@@ -353,28 +666,15 @@ PARSER_END(Virgulilla)
 /* ===================== Gramática ======================= */
 
 void Program() :
-{ Token bad; }
+{}
 {
-  {
-    scopes.enterScope(); // ámbito global
-  }
-  (
-    Statement()
-  | bad=<INVALID> {
-        System.err.printf(
-          "%s: error léxico en línea %d, columna %d: símbolo no reconocido \"%s\"%n",
-          Virgulilla.currentFilename,
-          bad.beginLine,
-          bad.beginColumn,
-          bad.image
-        );
-        Virgulilla.lexicalErrors++;
-    }
-  )*
+  { scopes.enterScope(); }
+
+  ( LOOKAHEAD( { getToken(1).kind != EOF } ) SafeStatement() )*
+
   <EOF>
-  {
-    scopes.exitScope(token); // cerrar global
-  }
+
+  { scopes.exitScope(token); }
 }
 
 /* ===================== Definiciones sintácticas ======================= */
@@ -385,18 +685,79 @@ void Program() :
 void Statement() :
 {}
 {
-      VarDecl() <FIN> | Print() <FIN> | BreakC() <FIN> | ContinueC() <FIN> | ReturnC() <FIN> | LOOKAHEAD( IncDecSimple() ) IncDecSimple() <FIN> | LOOKAHEAD( AssignmentCompound() ) AssignmentCompound() <FIN>
-    | LOOKAHEAD( Assignment() ) Assignment() <FIN> | ExprStatement() <FIN> | IfCond() | WhileC() | ForC() | TryCatch() | FuncDef() | Block()
+      IfCond()
+    | WhileC()
+    | ForC()
+    | TryCatch()
+    | FuncDef()
+    | Block()
+
+    | VarDecl() <FIN>
+    | Print() <FIN>
+    | BreakC() <FIN>
+    | ContinueC() <FIN>
+    | ReturnC() <FIN>
+
+    | LOOKAHEAD( IncDecSimple() ) IncDecSimple() <FIN>
+    | LOOKAHEAD( AssignmentCompound() ) AssignmentCompound() <FIN>
+    | LOOKAHEAD( Assignment() ) Assignment() <FIN>
+
+    | LOOKAHEAD( { getToken(1).kind == IDENT &&
+                  (getToken(2).kind == PARENABRE || getToken(2).kind == LLAVEABRE) } )
+      KeywordTypo() ExprStatement() <FIN>
+    | ExprStatement() <FIN>
+}
+
+/* ===== Statement con recuperación ===== */
+JAVACODE
+void SafeStatement() {
+  inSafeStatement = true;
+  stmtHadSyntaxError = false;
+  typoKeywords.clear();
+
+  // Léxico: INVALID
+  if (getToken(1).kind == INVALID) {
+    Token bad = getNextToken();
+    lexicalError(bad);
+    inSafeStatement = false;
+    return;
+  }
+
+  try {
+    Statement();
+  } catch (ParseException e) {
+    stmtHadSyntaxError = true;   
+    syntacticError(e);
+    panicRecover();
+  } finally {
+    inSafeStatement = false;
+  }
+}
+
+/* ===== Detectar typos de keywords escritas como IDENT ===== */
+JAVACODE
+void KeywordTypo() {
+  Token t = getToken(1);
+  if (t == null || t.kind != IDENT) return;
+
+  String sug = nearestKeyword(t.image);
+  if (sug != null) {
+    typoKeywords.add(t.image);      
+    keywordTypoError(t, sug);
+  }
 }
 
 /* ===== Definir bloques ===== */
 void Block() :
 {}
 {
-    <LLAVEABRE>
-    { scopes.enterScope(); }
-    ( Statement() )+ <LLAVECIERRA>
-    { scopes.exitScope(token); }
+  <LLAVEABRE>
+  { scopes.enterScope(); }
+
+  ( LOOKAHEAD( { getToken(1).kind != LLAVECIERRA } ) SafeStatement() )*
+
+  <LLAVECIERRA>
+  { scopes.exitScope(token); }
 }
 
 /* ===== Condición booleana general ===== */
@@ -418,6 +779,7 @@ void PrintArg() :
 {}
 {
     Expresion()
+    { popVType(token); }
 }
 
 /* ===== Sentencia try/catch ===== */
@@ -434,49 +796,69 @@ void TryCatch() :
 
 /* ===== Declaración de variable o constante ===== */
 void VarDecl() :
-{ Token id; Token kw; }
+{ Token id; Token kw; VType rhs; }
 {
-    ( kw=<VAR> | kw=<CONST> )
-    id=<IDENT>
-    {
-      scopes.declare(id, (kw.kind == VAR ? SymKind.VAR : SymKind.CONST));
-      beginInit(id);
-    }
-    <IGUAL>
-    Expresion()
-    {
-      endInit(id);
-    }
+  ( kw=<VAR> | kw=<CONST> )
+  id=<IDENT>
+  { beginInit(id); }
+  <IGUAL>
+  Expresion()
+  {
+    rhs = popVType(id);
+    endInit(id);
+    scopes.declareTyped(id, (kw.kind == VAR ? SymKind.VAR : SymKind.CONST), rhs);
+  }
 }
 
 /* ===== ReAsignación simple ===== */
 void Assignment() :
-{ Token id; SymbolInfo info; }
+{ Token id; SymbolInfo info; VType rhs; }
 {
-    id=<IDENT>
-    <IGUAL>
-    Expresion()
-    {
-      info = scopes.resolve(id);
-      if (info != null && info.isConst()) {
+  id=<IDENT>
+  <IGUAL>
+  Expresion()
+  {
+    rhs = popVType(id);
+    info = scopes.resolve(id);
+
+    if (info != null) {
+      if (info.isConst()) {
         semanticError(id, "No se puede reasignar la constante '" + id.image + "'.");
+      } else {
+        if (!canAssign(info.type, rhs)) {
+          semanticError(id,
+            "Asignación incompatible: '" + id.image + "' es " + info.type +
+            " pero se intenta asignar " + rhs + "."
+          );
+        }
       }
     }
+  }
 }
 
 /* ===== Asignación compuesta ===== */
 void AssignmentCompound() :
-{ Token id; Token op; SymbolInfo info; }
+{ Token id; Token op; SymbolInfo info; VType rhs; }
 {
-    id=<IDENT>
-    ( op=<SUMAIGUAL> | op=<RESTAIGUAL> | op=<MULTIGUAL> | op=<DIVIGUAL> | op=<MODIGUAL> )
-    Expresion()
-    {
-      info = scopes.resolve(id);
-      if (info != null && info.isConst()) {
+  id=<IDENT>
+  ( op=<SUMAIGUAL> | op=<RESTAIGUAL> | op=<MULTIGUAL> | op=<DIVIGUAL> | op=<MODIGUAL> )
+  Expresion()
+  {
+    rhs = popVType(op);
+    info = scopes.resolve(id);
+
+    if (info != null) {
+      if (info.isConst()) {
         semanticError(id, "No se puede aplicar '" + op.image + "' a la constante '" + id.image + "'.");
+      } else {
+        if (!isNumeric(info.type) || !isNumeric(rhs)) {
+          semanticError(op, "Operación '" + op.image + "' requiere numéricos, pero recibió " + info.type + " y " + rhs + ".");
+        } else if (info.type.k == VType.K.INT && rhs.k == VType.K.FLOAT) {
+          semanticError(op, "No se puede hacer '" + op.image + "' con INT y FLOAT (pierde precisión).");
+        }
       }
     }
+  }
 }
 
 /* ===== Sentencia de expresión: una expresión sola con "~" ===== */
@@ -484,20 +866,59 @@ void ExprStatement() :
 {}
 {
     Expresion()
+    { popVType(token); } // descartar resultado
 }
 
 /** ===== Expresión con + y - de menor precedencia ===== */
 void Expresion() :
-{}
+{ Token op; }
 {
-    Term() ( ( <SUMA> | <RESTA> ) Term() )*
+  Term()
+  (
+    ( op=<SUMA> | op=<RESTA> )
+    Term()
+    {
+      VType b = popVType(op);
+      VType a = popVType(op);
+
+      boolean aBad = (a.k != VType.K.UNKNOWN && a.k != VType.K.ERROR && !a.isNumeric());
+      boolean bBad = (b.k != VType.K.UNKNOWN && b.k != VType.K.ERROR && !b.isNumeric());
+
+      if (aBad || bBad) {
+        semanticError(op, "Operación '" + op.image + "' requiere numéricos, pero recibió " + a + " y " + b + ".");
+        pushVType(VType.ERROR);
+      } else {
+        if (a.k == VType.K.UNKNOWN || b.k == VType.K.UNKNOWN) pushVType(VType.UNKNOWN);
+        else pushVType((a.k == VType.K.FLOAT || b.k == VType.K.FLOAT) ? VType.FLOAT : VType.INT);
+      }
+    }
+  )*
 }
 
 /** ===== Término con *, / y % ===== */
 void Term() :
-{}
+{ Token op; }
 {
-    Factor() ( ( <MULTI> | <DIV> | <MODULO> ) Factor() )*
+  Factor()
+  (
+    ( op=<MULTI> | op=<DIV> | op=<MODULO> )
+    Factor()
+    {
+      VType b = popVType(op);
+      VType a = popVType(op);
+
+      boolean aBad = (a.k != VType.K.UNKNOWN && a.k != VType.K.ERROR && !a.isNumeric());
+      boolean bBad = (b.k != VType.K.UNKNOWN && b.k != VType.K.ERROR && !b.isNumeric());
+
+      if (aBad || bBad) {
+        semanticError(op, "Operación '" + op.image + "' requiere numéricos, pero recibió " + a + " y " + b + ".");
+        pushVType(VType.ERROR);
+      } else {
+        if (a.k == VType.K.UNKNOWN || b.k == VType.K.UNKNOWN) pushVType(VType.UNKNOWN);
+        else pushVType((a.k == VType.K.FLOAT || b.k == VType.K.FLOAT) ? VType.FLOAT : VType.INT);
+      }
+    }
+  )*
 }
 
 /** ===== Factor: o algo numérico con signo opcional o un identificador ===== */
@@ -509,32 +930,77 @@ void Factor() :
 
 /** ===== Literal: strings o bool ===== */
 void Literal() :
-{}
+{ Token t; }
 {
-      <STRING> | <TRUE> | <FALSE> | <NULL>
+    t=<STRING> { pushVType(VType.STRING); }
+  | t=<TRUE>   { pushVType(VType.BOOL); }
+  | t=<FALSE>  { pushVType(VType.BOOL); }
+  | t=<NULL>   { pushVType(VType.NULL); }
 }
 
 /** ===== Indexable: IDENT o llamada, con cero o más índices [expr] ===== */
 void Indexable() :
-{ boolean called; int idxCount = 0; }
+{ boolean called; int idxCount = 0; VType idxT; VType baseT; }
 {
     called=IdentOrCall()
     (
       <CORCHETEABRE> Expresion() <CORCHETECIERRA>
-      { idxCount++; }
+      {
+        idxCount++;
+
+        idxT = popVType(token);
+        if (idxT.k != VType.K.INT && idxT.k != VType.K.UNKNOWN && idxT.k != VType.K.ERROR) {
+          semanticError(token, "El índice debe ser INT, pero fue " + idxT + ".");
+        }
+      }
     )*
     {
       if (called && idxCount > 0) {
         semanticError(token, "No se permite indexar el resultado de una llamada (ej: f()[0]) sin sistema de tipos.");
+      }
+
+      baseT = popVType(token); // tipo del IDENT/call
+
+      if (idxCount == 0) {
+        pushVType(baseT);
+      } else {
+        if (baseT.k != VType.K.ARRAY && baseT.k != VType.K.UNKNOWN && baseT.k != VType.K.ERROR) {
+          semanticError(token, "Se intentó indexar un no-arreglo: " + baseT + ".");
+          pushVType(VType.ERROR);
+        } else if (baseT.k == VType.K.ARRAY) {
+          pushVType(baseT.elem == null ? VType.UNKNOWN : baseT.elem);
+        } else {
+          pushVType(baseT); // UNKNOWN/ERROR
+        }
       }
     }
 }
 
 /** ===== ArrayList: [ expr, expr, ... ] puede estar vacío ===== */
 void ArrayLiteral() :
-{}
+{ VType elemT = null; VType t; }
 {
-    <CORCHETEABRE> ( Expresion() ( <COMA> Expresion() )* )? <CORCHETECIERRA>
+  <CORCHETEABRE>
+    (
+      Expresion()
+      {
+        t = popVType(token);
+        if (elemT == null) elemT = t;
+        else elemT = unifyArrayElem(elemT, t, token);
+      }
+      ( <COMA> Expresion()
+        {
+          t = popVType(token);
+          if (elemT == null) elemT = t;
+          else elemT = unifyArrayElem(elemT, t, token);
+        }
+      )*
+    )?
+  <CORCHETECIERRA>
+  {
+    if (elemT == null) elemT = VType.UNKNOWN;   // [] vacío
+    pushVType(VType.arrayOf(elemT));
+  }
 }
 
 /** ===== SignoNumerico: número o expresión entre paréntesis, con signo opcional ===== */
@@ -546,9 +1012,11 @@ void SignoNumerico() :
 
 /** ===== Numerico: algo que es numérico ===== */
 void Numerico() :
-{}
+{ Token n; }
 {
-      <INT> | <FLOAT> | <PARENABRE> Expresion() <PARENCIERRA>
+    n=<INT>   { pushVType(VType.INT); }
+  | n=<FLOAT> { pushVType(VType.FLOAT); }
+  | <PARENABRE> Expresion() <PARENCIERRA>
 }
 
 /* =================== FIN: Variables =================== */
@@ -558,23 +1026,66 @@ void Numerico() :
 
 /* ===== OR: expr1 || expr2 || expr3, también con "|" ===== */
 void OrExpr() :
-{}
+{ Token op; VType b; VType a; }
 {
-    AndExpr() ( ( <OROR> | <OR> ) AndExpr() )*
+  AndExpr()
+  (
+    ( op=<OROR> | op=<OR> )
+    AndExpr()
+    {
+      b = popVType(op);
+      a = popVType(op);
+
+      if ((!isBool(a) && a.k != VType.K.UNKNOWN && a.k != VType.K.ERROR) ||
+          (!isBool(b) && b.k != VType.K.UNKNOWN && b.k != VType.K.ERROR)) {
+        semanticError(op, "Operador '" + op.image + "' requiere BOOL, pero recibió " + a + " y " + b + ".");
+        pushVType(VType.ERROR);
+      } else {
+        pushVType(VType.BOOL);
+      }
+    }
+  )*
 }
 
 /* ===== AND: expr1 && expr2 && expr3, también con "&" ===== */
 void AndExpr() :
-{}
+{ Token op; VType b; VType a; }
 {
-    NotExpr() ( ( <ANDAND> | <AND> ) NotExpr() )*
+  NotExpr()
+  (
+    ( op=<ANDAND> | op=<AND> )
+    NotExpr()
+    {
+      b = popVType(op);
+      a = popVType(op);
+
+      if ((!isBool(a) && a.k != VType.K.UNKNOWN && a.k != VType.K.ERROR) ||
+          (!isBool(b) && b.k != VType.K.UNKNOWN && b.k != VType.K.ERROR)) {
+        semanticError(op, "Operador '" + op.image + "' requiere BOOL, pero recibió " + a + " y " + b + ".");
+        pushVType(VType.ERROR);
+      } else {
+        pushVType(VType.BOOL);
+      }
+    }
+  )*
 }
 
 /* ===== NOT: !expr ===== */
 void NotExpr() :
-{}
+{ Token notTok = null; VType t; }
 {
-      ( <EXCLAMACION> )? BoolAtom()
+    ( notTok=<EXCLAMACION> )? BoolAtom()
+    {
+      if (notTok != null) {
+        t = popVType(notTok);
+        if (!isBool(t) && t != VType.UNKNOWN && t != VType.ERROR) {
+          semanticError(notTok, "Operador '!' requiere BOOL, pero recibió " + t + ".");
+          pushVType(VType.ERROR);
+        } else {
+          pushVType(VType.BOOL);
+        }
+      }
+    }
 }
 
 /* ===== Elemento básico booleano ===== */
@@ -582,19 +1093,24 @@ void BoolAtom() :
 {}
 {
       LOOKAHEAD(3, RelacionalStart() ) Relacional()
-    | <TRUE>
-    | <FALSE>
+    | <TRUE>  { pushVType(VType.BOOL); }
+    | <FALSE> { pushVType(VType.BOOL); }
     | <PARENABRE> Condicion() <PARENCIERRA>
 }
 
 /* ===== Operadores básicos booleanos ===== */
-void RelOp() :
-{}
+Token RelOp() :
+{ Token op; }
 {
-    <IGUALIGUAL> | <DISTINTO> | <MENORQ> | <MAYORQ> | <MENORIGUAL> | <MAYORIGUAL>
+    op=<IGUALIGUAL>  { return op; }
+  | op=<DISTINTO>    { return op; }
+  | op=<MENORIGUAL>  { return op; }
+  | op=<MAYORIGUAL>  { return op; }
+  | op=<MENORQ>      { return op; }
+  | op=<MAYORQ>      { return op; }
 }
 
-* ===== Predicción de relacional (solo para LOOKAHEAD) ===== */
+/* ===== Predicción de relacional (solo para LOOKAHEAD) ===== */
 void RelacionalStart() :
 {}
 {
@@ -603,9 +1119,44 @@ void RelacionalStart() :
 
 /* ===== Comparaciones: x < 10, x == y, etc. ===== */
 void Relacional() :
-{}
+{ Token op; VType b; VType a; }
 {
-    Expresion() RelOp() Expresion()
+    Expresion() op=RelOp() Expresion()
+    {
+      b = popVType(op);
+      a = popVType(op);
+
+      // <, >, <=, >= solo numéricos (pero UNKNOWN no debe cascadiar)
+      if (op.kind == MENORQ || op.kind == MAYORQ || op.kind == MENORIGUAL || op.kind == MAYORIGUAL) {
+
+        if (a.k == VType.K.ERROR || b.k == VType.K.ERROR) {
+          pushVType(VType.ERROR);
+        } else if (a.k == VType.K.UNKNOWN || b.k == VType.K.UNKNOWN) {
+          // No sabemos, pero no marcamos error para no cascadiar
+          pushVType(VType.BOOL);
+        } else if (!isNumeric(a) || !isNumeric(b)) {
+          semanticError(op, "Comparación '" + op.image + "' requiere numéricos, pero recibió " + a + " y " + b + ".");
+          pushVType(VType.ERROR);
+        } else {
+          pushVType(VType.BOOL);
+        }
+
+      } else {
+        // == o != : permitir comparar tipos iguales, numéricos entre sí, o null con cualquiera
+        boolean ok =
+            (a == VType.NULL || b == VType.NULL) ||
+            (a == VType.UNKNOWN || b == VType.UNKNOWN) ||
+            (a == b) ||
+            (isNumeric(a) && isNumeric(b));
+
+        if (!ok) {
+          semanticError(op, "Comparación '" + op.image + "' incompatible: " + a + " vs " + b + ".");
+          pushVType(VType.ERROR);
+        } else {
+          pushVType(VType.BOOL);
+        }
+      }
+    }
 }
 
 /* =================== FIN: Booleanos =================== */
@@ -615,17 +1166,31 @@ void Relacional() :
 
 /* ===== Sentencia if / elif / else ===== */
 void IfCond() :
-{}
+{ VType ct; }
 {
-    <IF> <PARENABRE> Condicion() <PARENCIERRA> Block() RestoIf()
+    <IF> <PARENABRE> Condicion() <PARENCIERRA>
+    {
+      ct = popVType(token);
+      if (!isBool(ct) && ct != VType.UNKNOWN && ct != VType.ERROR) {
+        semanticError(token, "La condición del if debe ser BOOL, pero fue " + ct + ".");
+      }
+    }
+    Block() RestoIf()
 }
 
 /* ===== Cadena de elif / else ===== */
 void RestoIf() :
-{}
+{ VType ct; }
 {
     (
-        <ELIF> <PARENABRE> Condicion() <PARENCIERRA> Block() RestoIf()
+        <ELIF> <PARENABRE> Condicion() <PARENCIERRA>
+        {
+          ct = popVType(token);
+          if (!isBool(ct) && ct != VType.UNKNOWN && ct != VType.ERROR) {
+            semanticError(token, "La condición del elif debe ser BOOL, pero fue " + ct + ".");
+          }
+        }
+        Block() RestoIf()
       | <ELSE> Block()
     )?
 }
@@ -637,10 +1202,14 @@ void RestoIf() :
 
 /* ===== Sentencia while ===== */
 void WhileC() :
-{}
+{ VType ct; }
 {
     <WHILE> <PARENABRE> Condicion() <PARENCIERRA>
     {
+      ct = popVType(token);
+      if (!isBool(ct) && ct != VType.UNKNOWN && ct != VType.ERROR) {
+        semanticError(token, "La condición del while debe ser BOOL, pero fue " + ct + ".");
+      }
       enterLoop();
     }
     Block()
@@ -688,43 +1257,88 @@ void IncDecSimple() :
 
 /* ===== Declaración sin FIN (para el for) ===== */
 void VarDeclNoFin() :
-{ Token id; Token kw; }
+{ Token id; Token kw; VType rhs; }
 {
     ( kw=<VAR> | kw=<CONST> )
     id=<IDENT>
+    {
+      beginInit(id);
+    }
     <IGUAL>
     Expresion()
     {
-      scopes.declare(id, (kw.kind == VAR ? SymKind.VAR : SymKind.CONST));
+      rhs = popVType(id);
+      endInit(id);
+
+      scopes.declareTyped(id, (kw.kind == VAR ? SymKind.VAR : SymKind.CONST), rhs);
     }
 }
 
 /* ===== Asignación sin FIN (para el for) ===== */
 void AssignmentNoFin() :
-{ Token id; SymbolInfo info; }
+{ Token id; SymbolInfo info; VType rhs; }
 {
     id=<IDENT>
     <IGUAL>
     Expresion()
     {
+      rhs = popVType(id);
+
       info = scopes.resolve(id);
-      if (info != null && info.isConst()) {
-        semanticError(id, "No se puede reasignar la constante '" + id.image + "'.");
+      if (info != null) {
+        if (info.isConst()) {
+          semanticError(id, "No se puede reasignar la constante '" + id.image + "'.");
+        } else if (info.type != VType.UNKNOWN && rhs != VType.UNKNOWN && info.type != rhs) {
+          semanticError(id,
+            "Asignación incompatible: '" + id.image + "' es " + info.type +
+            " pero se intenta asignar " + rhs + "."
+          );
+        }
       }
     }
 }
 
 /* ===== Asignaión Compuesta (para el for) sin FIN ===== */
 void AssignmentCompoundNoFin() :
-{ Token id; Token op; SymbolInfo info; }
+{ Token id; Token op; SymbolInfo info; VType rhs; VType lhs; }
 {
     id=<IDENT>
     ( op=<SUMAIGUAL> | op=<RESTAIGUAL> | op=<MULTIGUAL> | op=<DIVIGUAL> | op=<MODIGUAL> )
     Expresion()
     {
-      info = scopes.resolve(id);
-      if (info != null && info.isConst()) {
-        semanticError(id, "No se puede aplicar '" + op.image + "' a la constante '" + id.image + "'.");
+      // sacar el tipo del lado derecho (para no dejar basura en la pila)
+      rhs = popVType(op);
+
+      // validar que el identificador exista
+      info = scopes.resolve(id); // si no existe, aquí ya marca error
+      if (info != null) {
+
+        // no permitir sobre constantes
+        if (info.isConst()) {
+          semanticError(id, "No se puede aplicar '" + op.image + "' a la constante '" + id.image + "'.");
+        } else {
+
+          lhs = info.type;
+
+          // validación de tipos
+          // si alguno es UNKNOWN/ERROR no bloqueamos para no cascadiar errores
+          if (lhs != VType.UNKNOWN && rhs != VType.UNKNOWN && lhs != VType.ERROR && rhs != VType.ERROR) {
+
+            if (!isNumeric(lhs) || !isNumeric(rhs)) {
+              semanticError(op,
+                "Operación '" + op.image + "' requiere numéricos, pero '" + id.image +
+                "' es " + lhs + " y RHS es " + rhs + "."
+              );
+            }
+
+            else if (lhs == VType.INT && rhs == VType.FLOAT) {
+              semanticError(op,
+                "No se puede aplicar '" + op.image + "' porque '" + id.image +
+                "' es INT y RHS es FLOAT (pierde precisión)."
+              );
+            }
+          }
+        }
       }
     }
 }
@@ -744,6 +1358,20 @@ void ForUpdate() :
     | LOOKAHEAD( AssignmentCompoundNoFin() ) AssignmentCompoundNoFin() | AssignmentNoFin()
 }
 
+/* ===== Condición del for: para validar semántica ===== */
+void CondicionFor() :
+{ VType ct; }
+{
+    Condicion()
+    {
+      ct = popVType(token);
+      if (!isBool(ct) && ct != VType.UNKNOWN && ct != VType.ERROR) {
+        semanticError(token, "La condición del for debe ser BOOL, pero fue " + ct + ".");
+      }
+    }
+}
+
+
 /* ===== Sentencia for ===== */
 void ForC() :
 {}
@@ -754,7 +1382,7 @@ void ForC() :
       enterLoop();
     }
     <PARENABRE>
-      ForInit() <PUNTOCOMA> Condicion() <PUNTOCOMA> ForUpdate()
+      ForInit() <PUNTOCOMA> CondicionFor() <PUNTOCOMA> ForUpdate()
     <PARENCIERRA>
     Block()
     {
@@ -770,9 +1398,9 @@ void ForC() :
 
 /* ===== Sentencia return ===== */
 void ReturnC() :
-{ Token r; }
+{ Token r; VType rt; }
 {
-    r=<RETURN> ( Expresion() )?
+    r=<RETURN> ( Expresion() { rt = popVType(r); } )?
     {
       if (!inFunc()) {
         semanticError(r, "Uso de 'return' fuera de una función.");
@@ -793,23 +1421,22 @@ java.util.ArrayList<Token> ParamDef() :
 void FuncBlock(java.util.ArrayList<Token> params) :
 {}
 {
-    <LLAVEABRE>
-    {
-      scopes.enterScope();
+  <LLAVEABRE>
+  {
+    scopes.enterScope();
 
-      // Declarar parámetros como símbolos del scope de la función, evita duplicar errores
-      java.util.HashSet<String> seenP = new java.util.HashSet<>();
-      for (Token p : params) {
-        if (seenP.add(p.image)) {
-          scopes.declare(p, SymKind.PARAM);
-        }
+    java.util.HashSet<String> seenP = new java.util.HashSet<>();
+    for (Token p : params) {
+      if (seenP.add(p.image)) {
+        scopes.declare(p, SymKind.PARAM);
       }
     }
-    ( Statement() )+
-    <LLAVECIERRA>
-    {
-      scopes.exitScope(token);
-    }
+  }
+
+  ( LOOKAHEAD( { getToken(1).kind != LLAVECIERRA } ) SafeStatement() )*
+
+  <LLAVECIERRA>
+  { scopes.exitScope(token); }
 }
 
 /* ===== Sentencia función ===== */
@@ -836,8 +1463,8 @@ void FuncDef() :
 int ArgList() :
 { int n = 0; }
 {
-    Expresion() { n = 1; }
-    ( <COMA> Expresion() { n++; } )*
+    Expresion() { popVType(token); n = 1; }
+    ( <COMA> Expresion() { popVType(token); n++; } )*
     { return n; }
 }
 
@@ -871,6 +1498,16 @@ boolean IdentOrCall() :
           }
         }
       }
+
+      //PILA SEMÁNTICA: empujar tipo del IDENT o de la llamada
+      if (info == null) {
+        pushVType(VType.ERROR);
+      } else if (isCall) {
+        pushVType(VType.UNKNOWN);   
+      } else {
+        pushVType(info.type);      // var/const/param
+      }
+
       return isCall;
     }
 }
@@ -884,8 +1521,7 @@ boolean IdentOrCall() :
 /* ===== Espacios y comentarios ===== */
 SKIP : {
     " " | "\t" | "\r" | "\n"
-
-    | <"//" (~["\n", "\r"])* ("\n" | "\r" | "\r\n")>
+  | <"//" (~["\n", "\r"])* ("\n" | "\r" | "\r\n")>
 }
 
 /* ===== Macros para componer expresiones regulares ===== */

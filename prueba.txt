@@ -4,14 +4,14 @@ const LIM = 5~
 const META = 80~      
 const MIN_APROB = 70~ 
 
-// Arreglo global con calificaciones iniciales
+// Arreglo con calificaciones iniciales
 var calificaciones = [80, 60, 90, 75, 50]~
 
 
 // ================== Funciones ==================
 
 // Calcula el promedio 
-def promedio(lista) {
+deff promedio (lista) {
     var i = 0~
     var suma = 0~
 
@@ -24,12 +24,12 @@ def promedio(lista) {
 }
 
 
-def maximo(lista) {
+df maximo (lista) {
     var i = 1~
     var max = lista[0]~
 
-    while (i < LIM) {
-        if (lista[i] > max) {
+    whilee (i > LIM) {
+        iff (lista[i] > max) {
             max = lista[i]~
         }
         i++~
@@ -40,13 +40,14 @@ def maximo(lista) {
 
 
 
-while (true) {
-    var x = 1~
+var x = 0~
+while (x < 1) {
+    x = 1~
 }
 
 
 
-def minimo(lista) {
+def minimo (lista) {
     var i = 1~
     var min = lista[0]~
 
@@ -117,9 +118,6 @@ def imprime_reporte_grupo(nombre_grupo, lista) {
 
 
 // ================== Programa “principal” ==================
-
-
-subir_calificaciones(calificaciones)~
 
 
 imprime_reporte_grupo("GRUPO_AUTOMATAS", calificaciones)~

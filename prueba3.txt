@@ -1,0 +1,62 @@
+// ================== PRUEBA QUE PROVOCA ERRORES ==================
+
+// ---- 1) Uso antes de declarar (no declarado)
+print(x)~                    // ERROR: x no está declarado
+
+// ---- 2) Redeclaración en el mismo ámbito
+var a = 10~
+var a = 20~                  // ERROR: redeclaración de 'a'
+
+// ---- 3) Constante reasignada
+const PI = 3.14~
+PI = 3.1416~                 // ERROR: no se puede reasignar constante
+
+// ---- 4) Operación numérica con tipo no numérico (string + int)
+var s = "hola"~
+var t = s + 5~               // ERROR: '+' requiere numéricos
+
+// ---- 5) Comparación relacional con string
+if ("hola" < 10) {           // ERROR: '<' requiere numéricos
+    print("no debería")~
+}
+
+// ---- 6) Break fuera de ciclo
+break~                       // ERROR: break fuera de for/while
+
+// ---- 7) Continue fuera de ciclo
+continuar~                   // ERROR: continuar fuera de for/while
+
+// ---- 8) Return fuera de función
+return 5~                    // ERROR: return fuera de una función
+
+// ---- 9) Indexar algo que NO es arreglo
+var n = 7~
+print(n[0])~                 // ERROR: se intentó indexar un no-arreglo
+
+// ---- 10) Índice NO entero
+var arr = [1, 2, 3]~
+print(arr[1.5])~             // ERROR: el índice debe ser INT
+
+// ---- 11) Arreglo con tipos mezclados (si tu unifyArrayElem marca error)
+var mix = [1, "a", 3]~       // ERROR: arreglo con tipos mezclados
+
+// ---- 12) Llamada a función con aridad incorrecta
+def suma2(x, y) {
+    return x + y~
+}
+var r1 = suma2(10)~          // ERROR: aridad incorrecta (1 vs 2)
+
+// ---- 13) Llamar con () a algo que NO es función
+var z = 5~
+z()~                         // ERROR: 'z' no es función
+
+// ---- 14) Usar función sin paréntesis (si tu regla lo marca)
+suma2~                       // ERROR: función debe llamarse con paréntesis
+
+// ---- 15) Auto-inicialización (usar variable dentro de su propia init)
+var q = q + 1~               // ERROR: no se puede usar en su propia inicialización
+
+// ---- 16) AND/OR con no booleanos
+if (5 && 2) {                // ERROR: && requiere BOOL
+    print("x")~
+}
