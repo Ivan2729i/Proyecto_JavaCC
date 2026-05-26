@@ -310,7 +310,15 @@ public class Virgulilla implements VirgulillaConstants {
 
   /* ==== INICIO: PILA SEMÁNTICA (TIPOS) ==== */
   private final java.util.Stack<VType> semStack = new java.util.Stack<>();
-  private void pushVType(VType t) { semStack.push(t); }
+  private int maxSemStackSize = 0;
+
+  private void pushVType(VType t) {
+    semStack.push(t);
+
+    if (semStack.size() > maxSemStackSize) {
+      maxSemStackSize = semStack.size();
+    }
+  }
 
   private VType popVType(Token at) {
     if (semStack.isEmpty()) {
@@ -618,6 +626,984 @@ public class Virgulilla implements VirgulillaConstants {
   /* ==== FIN: VALIDACIÓN DE PARÁMETROS DUPLICADOS ==== */
 
 
+
+
+  /* ========== INICIO: CAPTURA DE EXPRESIONES EN INFIJA ============= */
+
+  private java.util.ArrayList<String> currentInfix = null;
+  private int exprCaptureDepth = 0;
+
+  private final java.util.ArrayList<String> postfixReports = new java.util.ArrayList<>();
+
+  private void beginExprCapture() {
+    if (exprCaptureDepth == 0) {
+      currentInfix = new java.util.ArrayList<>();
+    }
+    exprCaptureDepth++;
+  }
+
+  private java.util.ArrayList<String> endExprCapture() {
+    if (exprCaptureDepth <= 0) return null;
+
+    exprCaptureDepth--;
+    if (exprCaptureDepth == 0) {
+      java.util.ArrayList<String> out = new java.util.ArrayList<>(currentInfix);
+      currentInfix = null;
+      return out;
+    }
+    return null;
+  }
+
+  private boolean isCapturingExpr() {
+    return exprCaptureDepth > 0 && currentInfix != null;
+  }
+
+  private void cap(String lexeme) {
+    if (isCapturingExpr() && lexeme != null) {
+      currentInfix.add(lexeme);
+    }
+  }
+
+  private void savePostfixReport(String context, java.util.List<String> infix, java.util.List<String> postfix) {
+    if (infix == null || postfix == null) return;
+
+    postfixReports.add(
+      context +
+      "\n  infija:   " + String.join(" ", infix) +
+      "\n  postfija: " + String.join(" ", postfix)
+    );
+  }
+
+  public void printPostfixReports() {
+    if (postfixReports.isEmpty()) {
+      System.out.println("No se gener\u00f3 postfija.");
+      return;
+    }
+
+    System.out.println("=============== POSTFIJA GENERADA ===============");
+    for (String s : postfixReports) {
+      System.out.println(s);
+    }
+  }
+
+  /* ========== FIN: CAPTURA DE EXPRESIONES EN INFIJA ============= */
+
+
+  /* ==================== INICIO: SHUNTING YARD ====================== */
+
+  private static final class FuncMark {
+    final String name;
+    int argc = 0;
+    boolean sawArg = false;
+
+    FuncMark(String name) {
+      this.name = name;
+    }
+  }
+
+  private boolean isOperator(String s) {
+    return "+".equals(s) || "-".equals(s) || "*".equals(s) || "/".equals(s) || "%".equals(s)
+        || "<".equals(s) || ">".equals(s) || "<=".equals(s) || ">=".equals(s)
+        || "==".equals(s) || "!=".equals(s)
+        || "&&".equals(s) || "||".equals(s) || "&".equals(s) || "|".equals(s)
+        || "!".equals(s)
+        || "u-".equals(s) || "u+".equals(s)
+        || "INDEX".equals(s);
+  }
+
+  private boolean isLeftAssociative(String s) {
+    return !("u-".equals(s) || "u+".equals(s) || "!".equals(s));
+  }
+
+  private int precedence(String s) {
+    if ("INDEX".equals(s)) return 8;
+    if ("u-".equals(s) || "u+".equals(s) || "!".equals(s)) return 7;
+    if ("*".equals(s) || "/".equals(s) || "%".equals(s)) return 6;
+    if ("+".equals(s) || "-".equals(s)) return 5;
+    if ("<".equals(s) || ">".equals(s) || "<=".equals(s) || ">=".equals(s)) return 4;
+    if ("==".equals(s) || "!=".equals(s)) return 3;
+    if ("&".equals(s) || "&&".equals(s)) return 2;
+    if ("|".equals(s) || "||".equals(s)) return 1;
+    return -1;
+  }
+
+  private boolean isStructuralToken(String s) {
+    return "(".equals(s) || ")".equals(s) ||
+          "[".equals(s) || "]".equals(s) ||
+          "{".equals(s) || "}".equals(s) ||
+          ",".equals(s);
+  }
+
+  private boolean isOperandToken(String s) {
+    if (s == null || s.isEmpty()) return false;
+    if (isStructuralToken(s)) return false;
+    if (isOperator(s)) return false;
+    if (s.startsWith("CALL:")) return false;
+    if (s.startsWith("ARRAY:")) return false;
+    return true;
+  }
+
+  private java.util.ArrayList<String> normalizeUnary(java.util.List<String> infix) {
+    java.util.ArrayList<String> out = new java.util.ArrayList<>();
+    String prev = null;
+
+    for (String tok : infix) {
+      if ("+".equals(tok) || "-".equals(tok)) {
+        if (prev == null
+            || "(".equals(prev) || "[".equals(prev) || "{".equals(prev)
+            || ",".equals(prev)
+            || isOperator(prev)) {
+          out.add("+".equals(tok) ? "u+" : "u-");
+        } else {
+          out.add(tok);
+        }
+      } else {
+        out.add(tok);
+      }
+      prev = tok;
+    }
+
+    return out;
+  }
+
+  /*
+    Convenciones de captura usadas:
+    - llamada función: @CALL nombre ( ... )
+    - arreglo literal: [ ... ] normal, aquí se reconoce como literal si no hay operando antes
+    - indexación: operando [ expr ]
+  */
+  private java.util.ArrayList<String> toPostfix(java.util.List<String> rawInfix) {
+    java.util.ArrayList<String> infix = normalizeUnary(rawInfix);
+    java.util.ArrayList<String> output = new java.util.ArrayList<>();
+    java.util.Stack<String> ops = new java.util.Stack<>();
+    java.util.Stack<FuncMark> funcStack = new java.util.Stack<>();
+    java.util.Stack<Integer> arrayElemCount = new java.util.Stack<>();
+    java.util.Stack<Boolean> arraySawElem = new java.util.Stack<>();
+
+    String prev = null;
+
+    for (int i = 0; i < infix.size(); i++) {
+      String tok = infix.get(i);
+
+      // Marcador de llamada
+      if ("@CALL".equals(tok)) {
+        if (i + 1 >= infix.size()) {
+          throw new RuntimeException("Falta nombre de funci\u00f3n despu\u00e9s de @CALL.");
+        }
+        String fname = infix.get(++i);
+        funcStack.push(new FuncMark(fname));
+        ops.push("FUNC(" + fname + ")");
+        prev = "FUNCNAME";
+        continue;
+      }
+
+      if (isOperandToken(tok)) {
+        output.add(tok);
+
+        if (!funcStack.isEmpty()) {
+          String topOp = ops.isEmpty() ? null : ops.peek();
+          if ("(".equals(topOp)) {
+            funcStack.peek().sawArg = true;
+          }
+        }
+
+        if (!arraySawElem.isEmpty()) {
+          arraySawElem.set(arraySawElem.size() - 1, true);
+        }
+
+        prev = tok;
+        continue;
+      }
+
+      // Paréntesis
+      if ("(".equals(tok)) {
+        ops.push(tok);
+        prev = tok;
+        continue;
+      }
+
+      if (")".equals(tok)) {
+        while (!ops.isEmpty() && !"(".equals(ops.peek())) {
+          output.add(ops.pop());
+        }
+        if (ops.isEmpty()) {
+          throw new RuntimeException("Par\u00e9ntesis desbalanceados: falta '('.");
+        }
+        ops.pop(); // quitar "("
+
+        if (!ops.isEmpty() && ops.peek().startsWith("FUNC(")) {
+          String marker = ops.pop();
+          String fname = marker.substring(5, marker.length() - 1);
+
+          FuncMark fm = funcStack.pop();
+          int argc = 0;
+          if (fm.sawArg) argc = fm.argc + 1;
+
+          output.add("CALL:" + fname + ":" + argc);
+        }
+
+        prev = tok;
+        continue;
+      }
+
+      // Corchetes
+      if ("[".equals(tok)) {
+        boolean arrayLiteral = (prev == null
+            || "(".equals(prev) || "[".equals(prev) || "{".equals(prev)
+            || ",".equals(prev)
+            || isOperator(prev));
+
+        if (arrayLiteral) {
+          ops.push("ARR[");
+          arrayElemCount.push(0);
+          arraySawElem.push(false);
+        } else {
+          ops.push("[");
+        }
+
+        prev = tok;
+        continue;
+      }
+
+      if ("]".equals(tok)) {
+        while (!ops.isEmpty() && !"[".equals(ops.peek()) && !"ARR[".equals(ops.peek())) {
+          output.add(ops.pop());
+        }
+        if (ops.isEmpty()) {
+          throw new RuntimeException("Corchetes desbalanceados: falta '['.");
+        }
+
+        String opener = ops.pop();
+
+        if ("[".equals(opener)) {
+          output.add("INDEX");
+        } else {
+          boolean saw = arraySawElem.pop();
+          int commas = arrayElemCount.pop();
+          int n = saw ? commas + 1 : 0;
+          output.add("ARRAY:" + n);
+        }
+
+        prev = tok;
+        continue;
+      }
+
+      if ("{".equals(tok) || "}".equals(tok)) {
+        prev = tok;
+        continue;
+      }
+
+      // Comas
+      if (",".equals(tok)) {
+        while (!ops.isEmpty()
+            && !"(".equals(ops.peek())
+            && !"[".equals(ops.peek())
+            && !"ARR[".equals(ops.peek())) {
+          output.add(ops.pop());
+        }
+
+        if (!funcStack.isEmpty()) {
+          funcStack.peek().argc++;
+        } else if (!arrayElemCount.isEmpty()) {
+          arrayElemCount.set(arrayElemCount.size() - 1, arrayElemCount.peek() + 1);
+        } else {
+          throw new RuntimeException("Coma fuera de funci\u00f3n o arreglo.");
+        }
+
+        prev = tok;
+        continue;
+      }
+
+      // Operadores
+      if (isOperator(tok)) {
+        while (!ops.isEmpty() && isOperator(ops.peek())) {
+          String top = ops.peek();
+
+          boolean popByPrec =
+            (isLeftAssociative(tok) && precedence(tok) <= precedence(top)) ||
+            (!isLeftAssociative(tok) && precedence(tok) < precedence(top));
+
+          if (!popByPrec) break;
+          output.add(ops.pop());
+        }
+        ops.push(tok);
+        prev = tok;
+        continue;
+      }
+
+      throw new RuntimeException("Token no soportado en Shunting Yard: " + tok);
+    }
+
+    while (!ops.isEmpty()) {
+      String top = ops.pop();
+      if ("(".equals(top) || ")".equals(top) || "[".equals(top) || "]".equals(top) || "ARR[".equals(top)) {
+        throw new RuntimeException("Delimitadores desbalanceados al final de la conversi\u00f3n.");
+      }
+      output.add(top);
+    }
+
+    return output;
+  }
+
+  /* ==================== FIN: SHUNTING YARD ====================== */
+
+
+  /* ==================== INICIO: CUÁDRUPLOS ====================== */
+
+  static final class Quad {
+    final String op;
+    final String arg1;
+    final String arg2;
+    final String res;
+
+    Quad(String op, String arg1, String arg2, String res) {
+      this.op = op;
+      this.arg1 = arg1;
+      this.arg2 = arg2;
+      this.res = res;
+    }
+
+    @Override
+    public String toString() {
+      return "(" + op + ", " + arg1 + ", " + arg2 + ", " + res + ")";
+    }
+  }
+
+  private final java.util.ArrayList<Quad> quads = new java.util.ArrayList<>();
+  private int tempCounter = 1;
+  private int labelCounter = 1;
+
+  // último lugar/temporal producido por la expresión más reciente
+  private String lastPlace = "_";
+
+  // buffer temporal para el update del for
+  private java.util.ArrayList<Quad> quadBuffer = null;
+
+  // labels de ciclos para break/continue
+  private final java.util.Stack<String> loopContinueLabels = new java.util.Stack<>();
+  private final java.util.Stack<String> loopBreakLabels = new java.util.Stack<>();
+
+  private String newTemp() {
+    return "t" + (tempCounter++);
+  }
+
+  private String newLabel() {
+    return "L" + (labelCounter++);
+  }
+
+  private void emit(String op, String arg1, String arg2, String res) {
+    Quad q = new Quad(op, arg1, arg2, res);
+    if (quadBuffer != null) quadBuffer.add(q);
+    else quads.add(q);
+  }
+
+  private void beginQuadBuffer() {
+    quadBuffer = new java.util.ArrayList<>();
+  }
+
+  private java.util.ArrayList<Quad> endQuadBuffer() {
+    java.util.ArrayList<Quad> out = quadBuffer;
+    quadBuffer = null;
+    return out == null ? new java.util.ArrayList<Quad>() : out;
+  }
+
+  private void appendQuads(java.util.List<Quad> more) {
+    if (more == null) return;
+    quads.addAll(more);
+  }
+
+  private void pushLoopLabels(String continueLabel, String breakLabel) {
+    loopContinueLabels.push(continueLabel);
+    loopBreakLabels.push(breakLabel);
+  }
+
+  private void popLoopLabels() {
+    if (!loopContinueLabels.isEmpty()) loopContinueLabels.pop();
+    if (!loopBreakLabels.isEmpty()) loopBreakLabels.pop();
+  }
+
+  private String currentContinueLabel() {
+    return loopContinueLabels.isEmpty() ? null : loopContinueLabels.peek();
+  }
+
+  private String currentBreakLabel() {
+    return loopBreakLabels.isEmpty() ? null : loopBreakLabels.peek();
+  }
+
+  public void printQuads() {
+    if (quads.isEmpty()) {
+      System.out.println("No se generaron cu\u00e1druplos.");
+      return;
+    }
+
+    System.out.println("=============== CUADRUPLOS ===============");
+    for (Quad q : quads) {
+      System.out.println(q);
+    }
+  }
+
+  private boolean isBinaryQuadOp(String tok) {
+    return "+".equals(tok) || "-".equals(tok) || "*".equals(tok) || "/".equals(tok) || "%".equals(tok)
+        || "<".equals(tok) || ">".equals(tok) || "<=".equals(tok) || ">=".equals(tok)
+        || "==".equals(tok) || "!=".equals(tok)
+        || "&&".equals(tok) || "||".equals(tok) || "&".equals(tok) || "|".equals(tok);
+  }
+
+  private boolean isUnaryQuadOp(String tok) {
+    return "u-".equals(tok) || "u+".equals(tok) || "!".equals(tok);
+  }
+
+  private String mapUnaryQuadOp(String tok) {
+    if ("u-".equals(tok)) return "UMINUS";
+    if ("u+".equals(tok)) return "UPLUS";
+    return "!";
+  }
+
+  private String compoundToBaseOp(Token op) {
+    if (op.kind == SUMAIGUAL)  return "+";
+    if (op.kind == RESTAIGUAL) return "-";
+    if (op.kind == MULTIGUAL)  return "*";
+    if (op.kind == DIVIGUAL)   return "/";
+    return "%";
+  }
+
+  private String generateFromPostfix(java.util.List<String> postfix) {
+    java.util.Stack<String> st = new java.util.Stack<>();
+
+    for (String tok : postfix) {
+
+      if (isBinaryQuadOp(tok)) {
+        if (st.size() < 2) throw new RuntimeException("Pila insuficiente para operador binario: " + tok);
+        String right = st.pop();
+        String left  = st.pop();
+        String t = newTemp();
+        emit(tok, left, right, t);
+        st.push(t);
+      }
+
+      else if (isUnaryQuadOp(tok)) {
+        if (st.isEmpty()) throw new RuntimeException("Pila insuficiente para operador unario: " + tok);
+        String x = st.pop();
+        String t = newTemp();
+        emit(mapUnaryQuadOp(tok), x, "_", t);
+        st.push(t);
+      }
+
+      else if ("INDEX".equals(tok)) {
+        if (st.size() < 2) throw new RuntimeException("Pila insuficiente para INDEX");
+        String index = st.pop();
+        String base  = st.pop();
+        String t = newTemp();
+        emit("INDEX", base, index, t);
+        st.push(t);
+      }
+
+      else if (tok.startsWith("ARRAY:")) {
+        int n = Integer.parseInt(tok.substring("ARRAY:".length()));
+        if (st.size() < n) throw new RuntimeException("Pila insuficiente para " + tok);
+
+        java.util.ArrayList<String> elems = new java.util.ArrayList<>();
+        for (int i = 0; i < n; i++) {
+          elems.add(0, st.pop());
+        }
+
+        String t = newTemp();
+        emit("ARRAY", elems.toString(), "_", t);
+        st.push(t);
+      }
+
+      else if (tok.startsWith("CALL:")) {
+        String[] parts = tok.split(":");
+        if (parts.length != 3) throw new RuntimeException("CALL mal formado: " + tok);
+
+        String fname = parts[1];
+        int argc = Integer.parseInt(parts[2]);
+
+        if (st.size() < argc) throw new RuntimeException("Pila insuficiente para " + tok);
+
+        java.util.ArrayList<String> args = new java.util.ArrayList<>();
+        for (int i = 0; i < argc; i++) {
+          args.add(0, st.pop());
+        }
+
+        for (String a : args) {
+          emit("PARAM", a, "_", "_");
+        }
+
+        String t = newTemp();
+        emit("CALL", fname, String.valueOf(argc), t);
+        st.push(t);
+      }
+
+      else {
+        st.push(tok);
+      }
+    }
+
+    return st.isEmpty() ? "_" : st.pop();
+  }
+
+
+    /* ==================== INICIO: OPTIMIZACIÓN LOCAL ====================== */
+
+  private boolean isIntegerLiteral(String s) {
+    return s != null && s.matches("-?\\d+");
+  }
+
+  private boolean isFloatLiteral(String s) {
+    return s != null && s.matches("-?\\d+\\.\\d+");
+  }
+
+  private boolean isNumericLiteral(String s) {
+    return isIntegerLiteral(s) || isFloatLiteral(s);
+  }
+
+  private boolean isZero(String s) {
+    return "0".equals(s) || "0.0".equals(s);
+  }
+
+  private boolean isOne(String s) {
+    return "1".equals(s) || "1.0".equals(s);
+  }
+
+  private String foldConstants(String op, String a, String b) {
+    if (!isNumericLiteral(a) || !isNumericLiteral(b)) return null;
+
+    double x = Double.parseDouble(a);
+    double y = Double.parseDouble(b);
+    double r;
+
+    switch (op) {
+      case "+": r = x + y; break;
+      case "-": r = x - y; break;
+      case "*": r = x * y; break;
+      case "/":
+        if (y == 0) return null;
+        r = x / y;
+        break;
+      case "%":
+        if (y == 0) return null;
+        r = x % y;
+        break;
+      default:
+        return null;
+    }
+
+    if (r == (long) r) {
+      return String.valueOf((long) r);
+    }
+
+    return String.valueOf(r);
+  }
+
+  private Quad optimizarQuadLocal(Quad q) {
+    String op = q.op;
+    String a = q.arg1;
+    String b = q.arg2;
+    String r = q.res;
+
+    String folded = foldConstants(op, a, b);
+    if (folded != null) {
+      return new Quad("=", folded, "_", r); // Optimización local: cálculo constante resuelto en compilación
+    }
+
+    if ("+".equals(op) && isZero(b)) {
+      return new Quad("=", a, "_", r); // Optimización local: x + 0 se reemplaza por x
+    }
+
+    if ("+".equals(op) && isZero(a)) {
+      return new Quad("=", b, "_", r); // Optimización local: 0 + x se reemplaza por x
+    }
+
+    if ("-".equals(op) && isZero(b)) {
+      return new Quad("=", a, "_", r); // Optimización local: x - 0 se reemplaza por x
+    }
+
+    if ("*".equals(op) && isOne(b)) {
+      return new Quad("=", a, "_", r); // Optimización local: x * 1 se reemplaza por x
+    }
+
+    if ("*".equals(op) && isOne(a)) {
+      return new Quad("=", b, "_", r); // Optimización local: 1 * x se reemplaza por x
+    }
+
+    if ("*".equals(op) && (isZero(a) || isZero(b))) {
+      return new Quad("=", "0", "_", r); // Optimización local: x * 0 se reemplaza por 0
+    }
+
+    if ("/".equals(op) && isOne(b)) {
+      return new Quad("=", a, "_", r); // Optimización local: x / 1 se reemplaza por x
+    }
+
+    if ("%".equals(op) && isOne(b)) {
+      return new Quad("=", "0", "_", r); // Optimización local: x % 1 se reemplaza por 0
+    }
+
+    return q;
+  }
+
+  private void optimizarLocal() {
+    java.util.ArrayList<Quad> optimizados = new java.util.ArrayList<>();
+
+    for (Quad q : quads) {
+      optimizados.add(optimizarQuadLocal(q)); // Optimización local: se revisa cada cuádruplo individualmente
+    }
+
+    quads.clear();
+    quads.addAll(optimizados);
+  }
+
+  /* ==================== FIN: OPTIMIZACIÓN LOCAL ====================== */
+
+
+    /* ==================== INICIO: OPTIMIZACIÓN DE CICLOS ====================== */
+
+  private java.util.ArrayList<Quad> optimizarActualizacionFor(java.util.ArrayList<Quad> updateQuads) {
+    java.util.ArrayList<Quad> optimizados = new java.util.ArrayList<>();
+
+    for (int i = 0; i < updateQuads.size(); i++) {
+      Quad q1 = updateQuads.get(i);
+
+      if (i + 1 < updateQuads.size()) {
+        Quad q2 = updateQuads.get(i + 1);
+
+        if (("+".equals(q1.op) || "-".equals(q1.op)) &&
+            "1".equals(q1.arg2) &&
+            esTemporal(q1.res) &&
+            "=".equals(q2.op) &&
+            q1.res.equals(q2.arg1) &&
+            q1.arg1.equals(q2.res)) {
+
+          String nuevaOp = "+".equals(q1.op) ? "INC" : "DEC";
+
+          optimizados.add(
+            new Quad(nuevaOp, q1.arg1, "_", q2.res)
+          ); // Optimización de ciclos: compacta actualización del for, reduce operación + asignación a INC/DEC
+
+          i++;
+          continue;
+        }
+      }
+
+      optimizados.add(q1);
+    }
+
+    return optimizados;
+  }
+
+
+  private boolean esAsignacionConstanteATemporal(Quad q) {
+    return "=".equals(q.op) &&
+           isNumericLiteral(q.arg1) &&
+           "_".equals(q.arg2) &&
+           esTemporal(q.res);
+  }
+
+  private boolean esOperacionConstanteATemporal(Quad q) {
+    return ("+".equals(q.op) || "-".equals(q.op) || "*".equals(q.op) || "/".equals(q.op) || "%".equals(q.op)) &&
+           isNumericLiteral(q.arg1) &&
+           isNumericLiteral(q.arg2) &&
+           esTemporal(q.res);
+  }
+
+  private boolean esInvarianteDeCiclo(Quad q) {
+    return esAsignacionConstanteATemporal(q) ||
+           esOperacionConstanteATemporal(q);
+  }
+
+  private int buscarLabel(String label) {
+    for (int i = 0; i < quads.size(); i++) {
+      Quad q = quads.get(i);
+      if ("LABEL".equals(q.op) && label.equals(q.res)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private int buscarGotoAlInicio(String startLabel, int desde) {
+    for (int i = desde; i < quads.size(); i++) {
+      Quad q = quads.get(i);
+      if ("GOTO".equals(q.op) && startLabel.equals(q.res)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private void optimizarInvariantesDeCiclo() {
+    java.util.ArrayList<Quad> resultado = new java.util.ArrayList<>();
+
+    int i = 0;
+
+    while (i < quads.size()) {
+      Quad actual = quads.get(i);
+
+      if ("LABEL".equals(actual.op)) {
+        String startLabel = actual.res;
+        int gotoBack = buscarGotoAlInicio(startLabel, i + 1);
+
+        if (gotoBack != -1) {
+          java.util.ArrayList<Quad> invariantes = new java.util.ArrayList<>();
+          java.util.ArrayList<Quad> cuerpo = new java.util.ArrayList<>();
+
+          for (int j = i + 1; j < gotoBack; j++) {
+            Quad q = quads.get(j);
+
+            if (esInvarianteDeCiclo(q)) {
+              invariantes.add(q); // Optimización de ciclos: cálculo constante movido fuera del ciclo
+            } else {
+              cuerpo.add(q);
+            }
+          }
+
+          resultado.addAll(invariantes); // Optimización de ciclos: los invariantes se ejecutan una sola vez
+          resultado.add(actual);
+          resultado.addAll(cuerpo);
+          resultado.add(quads.get(gotoBack));
+
+          i = gotoBack + 1;
+          continue;
+        }
+      }
+
+      resultado.add(actual);
+      i++;
+    }
+
+    quads.clear();
+    quads.addAll(resultado);
+  }
+
+  private void optimizarCiclos() {
+    optimizarInvariantesDeCiclo(); // Optimización de ciclos: extrae cálculos constantes fuera de ciclos
+  }
+
+  /* ==================== FIN: OPTIMIZACIÓN DE CICLOS ====================== */
+
+
+    /* ==================== INICIO: OPTIMIZACIÓN GLOBAL ====================== */
+
+  private boolean esAsignacionATemporal(Quad q) {
+    return esTemporal(q.res);
+  }
+
+  private boolean usaTemporal(Quad q, String temp) {
+    return temp.equals(q.arg1) || temp.equals(q.arg2);
+  }
+
+  private boolean temporalSeUsaDespues(int index, String temp) {
+    for (int i = index + 1; i < quads.size(); i++) {
+      if (usaTemporal(quads.get(i), temp)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void eliminarTemporalesMuertosGlobal() {
+    java.util.HashSet<String> usados = new java.util.HashSet<>();
+    java.util.ArrayList<Quad> optimizados = new java.util.ArrayList<>(quads.size());
+
+    for (int i = quads.size() - 1; i >= 0; i--) {
+      Quad q = quads.get(i);
+
+      if (esAsignacionATemporal(q) && !usados.contains(q.res)) {
+        continue; // Optimización global: elimina temporal muerto sin buscar hacia adelante
+      }
+
+      if (esTemporal(q.arg1)) usados.add(q.arg1);
+      if (esTemporal(q.arg2)) usados.add(q.arg2);
+
+      optimizados.add(0, q);
+    }
+
+    quads.clear();
+    quads.addAll(optimizados);
+  }
+
+    private boolean esCopiaSimple(Quad q) {
+    return "=".equals(q.op) &&
+           "_".equals(q.arg2) &&
+           q.arg1 != null &&
+           q.res != null &&
+           !q.arg1.equals(q.res);
+  }
+
+  private String resolverCopia(java.util.HashMap<String, String> copias, String valor) {
+    if (valor == null) return null;
+
+    String actual = valor;
+    java.util.HashSet<String> visitados = new java.util.HashSet<>();
+
+    while (copias.containsKey(actual) && !visitados.contains(actual)) {
+      visitados.add(actual);
+      actual = copias.get(actual);
+    }
+
+    return actual;
+  }
+
+  private void propagarCopiasGlobal() {
+    java.util.HashMap<String, String> copias = new java.util.HashMap<>();
+    java.util.ArrayList<Quad> optimizados = new java.util.ArrayList<>();
+
+    for (Quad q : quads) {
+      String nuevoArg1 = resolverCopia(copias, q.arg1);
+      String nuevoArg2 = resolverCopia(copias, q.arg2);
+
+      Quad nuevo = new Quad(q.op, nuevoArg1, nuevoArg2, q.res);
+
+      if (esCopiaSimple(nuevo)) {
+        copias.put(nuevo.res, nuevo.arg1); // Optimización global: guarda copia para sustituir usos posteriores
+      } else {
+        copias.remove(nuevo.res); // Optimización global: invalida la copia si el destino cambia
+      }
+
+      optimizados.add(nuevo);
+    }
+
+    quads.clear();
+    quads.addAll(optimizados);
+  }
+
+  private void optimizarGlobal() {
+    propagarCopiasGlobal(); // Optimización global: sustituye copias por su valor original
+    eliminarTemporalesMuertosGlobal(); // Optimización global: elimina temporales que ya no se usan tras propagar copias
+  }
+
+  /* ==================== FIN: OPTIMIZACIÓN GLOBAL ====================== */
+
+
+  /* ==================== INICIO: OPTIMIZACIÓN MIRILLA ====================== */
+
+  private void optimizarMirilla() {
+    java.util.ArrayList<Quad> optimizados = new java.util.ArrayList<>();
+
+    for (int i = 0; i < quads.size(); i++) {
+      Quad actual = quads.get(i);
+
+      if ("=".equals(actual.op) &&
+          actual.arg1 != null &&
+          actual.arg1.equals(actual.res)) {
+        continue; // Optimización mirilla: elimina asignación redundante x=x
+      }
+
+      if (i + 1 < quads.size()) {
+        Quad siguiente = quads.get(i + 1);
+
+        if ("GOTO".equals(actual.op) &&
+            "LABEL".equals(siguiente.op) &&
+            actual.res != null &&
+            actual.res.equals(siguiente.res)) {
+          continue; // Optimización mirilla: elimina salto redundante hacia la siguiente etiqueta
+        }
+
+        if ("=".equals(actual.op) &&
+            "=".equals(siguiente.op) &&
+            actual.res != null &&
+            actual.res.equals(siguiente.arg1)) {
+
+          optimizados.add(
+            new Quad(
+              "=",
+              actual.arg1,
+              "_",
+              siguiente.res
+            )
+          ); // Optimización mirilla: elimina copia intermedia consecutiva
+
+          i++;
+          continue;
+        }
+      }
+
+      optimizados.add(actual);
+    }
+
+    quads.clear();
+    quads.addAll(optimizados);
+  }
+
+  /* ==================== FIN: OPTIMIZACIÓN MIRILLA ====================== */
+
+  /* ==================== FIN: CUÁDRUPLOS ====================== */
+
+
+
+  /* ===== INICIO: ESTADÍSTICAS ===== */
+
+  private static long inicioCompilacion;
+  private static long finCompilacion;
+
+  private static long memoriaAntes;
+  private static long memoriaDespues;
+
+  private static void iniciarEstadisticas() {
+    Runtime runtime = Runtime.getRuntime();
+    runtime.gc();
+
+    memoriaAntes = runtime.totalMemory() - runtime.freeMemory();
+    inicioCompilacion = System.nanoTime();
+  }
+
+  private static void finalizarEstadisticas() {
+    finCompilacion = System.nanoTime();
+
+    Runtime runtime = Runtime.getRuntime();
+    runtime.gc();
+
+    memoriaDespues = runtime.totalMemory() - runtime.freeMemory();
+  }
+
+  private static void imprimirEstadisticas() {
+    double tiempoMs = (finCompilacion - inicioCompilacion) / 1_000_000.0;
+    double memoriaKB = (memoriaDespues - memoriaAntes) / 1024.0;
+
+    System.out.println("=============== ESTAD\u00cdSTICAS ===============");
+    System.out.printf("Tiempo de compilaci\u00f3n: %.4f ms%n", tiempoMs);
+    System.out.printf("Memoria usada aproximada: %.2f KB%n", memoriaKB);
+  }
+
+  private boolean esTemporal(String s) {
+    if (s == null || s.length() < 2 || s.charAt(0) != 't') return false;
+
+    for (int i = 1; i < s.length(); i++) {
+      if (!Character.isDigit(s.charAt(i))) return false;
+    }
+
+    return true;
+  }
+
+  private int contarTemporalesUsados() {
+    java.util.HashSet<String> temporales = new java.util.HashSet<>();
+
+    for (Quad q : quads) {
+      if (esTemporal(q.arg1)) temporales.add(q.arg1);
+      if (esTemporal(q.arg2)) temporales.add(q.arg2);
+      if (esTemporal(q.res)) temporales.add(q.res);
+    }
+
+    return temporales.size();
+  }
+
+  private void imprimirCostosCodigoIntermedio() {
+    int cantidadCuadruplos = quads.size();
+    int costoRegistros = contarTemporalesUsados(); // Métrica ajustada: cuenta temporales que siguen vivos tras optimizar
+    int costoPilaSemantica = maxSemStackSize;
+    int costoPilasControl = loopContinueLabels.size() + loopBreakLabels.size();
+
+    System.out.println("=============== COSTOS DEL C\u00d3DIGO INTERMEDIO ===============");
+    System.out.println("Cantidad de cu\u00e1druplos generados: " + cantidadCuadruplos);
+    System.out.println("Costo en registros temporales: " + costoRegistros);
+    System.out.println("Costo m\u00e1ximo en pila sem\u00e1ntica: " + costoPilaSemantica);
+    System.out.println("Costo actual en pilas de control: " + costoPilasControl);
+  }
+
+  /* ===== FIN: ESTADÍSTICAS ===== */
+
+
+
   public static void main(String[] args) throws Exception {
     String filename = (args.length > 0) ? args[0] : "<stdin>";
     currentFilename = filename;
@@ -625,6 +1611,8 @@ public class Virgulilla implements VirgulillaConstants {
     java.io.Reader r = (args.length > 0)
         ? new java.io.InputStreamReader(new java.io.FileInputStream(args[0]), java.nio.charset.StandardCharsets.UTF_8)
         : new java.io.InputStreamReader(System.in, java.nio.charset.StandardCharsets.UTF_8);
+
+    iniciarEstadisticas();
 
     Virgulilla p = new Virgulilla(r);
 
@@ -641,14 +1629,27 @@ public class Virgulilla implements VirgulillaConstants {
       syntacticErrors++;
     }
 
+    finalizarEstadisticas(); // Aquí termina la compilación real
+
     if (lexicalErrors == 0 && syntacticErrors == 0 && semanticErrors == 0) {
       System.out.println("Esta muy bien: L\u00e9xico, sintaxis y sem\u00e1ntica sin errores.");
+      p.printPostfixReports();
+
+      p.optimizarLocal();   // Optimización local
+      p.optimizarCiclos();  // Optimización de ciclos
+      p.optimizarGlobal();  // Optimización global
+      p.optimizarMirilla(); // Optimización mirilla
+
+      p.printQuads();
+      p.imprimirCostosCodigoIntermedio();
     } else {
       System.err.printf(
         "%s: se encontraron %d errores l\u00e9xicos, %d errores sint\u00e1cticos y %d errores sem\u00e1nticos.%n",
         filename, lexicalErrors, syntacticErrors, semanticErrors
       );
     }
+
+    imprimirEstadisticas();
   }
 
 /* ===================== Gramática ======================= */
@@ -845,17 +1846,32 @@ scopes.exitScope(token);
 }
 
 /* ===== Relleno de print ===== */
-  final public void PrintArg() throws ParseException {
+  final public void PrintArg() throws ParseException {java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String result;
+beginExprCapture();
     Expresion();
-popVType(token);
+infix = endExprCapture();
+      postfix = toPostfix(infix);
+      savePostfixReport("PrintArg", infix, postfix);
+
+      result = generateFromPostfix(postfix);
+      lastPlace = result;
+      emit("PRINT", result, "_", "_");
+
+      popVType(token);
 }
 
 /* ===== Sentencia try/catch ===== */
-  final public void TryCatch() throws ParseException {
+  final public void TryCatch() throws ParseException {String catchLabel; String endLabel;
     jj_consume_token(TRY);
+catchLabel = newLabel();
+      endLabel = newLabel();
+      emit("TRY_BEGIN", "_", "_", catchLabel);
     Block();
+emit("GOTO", "_", "_", endLabel);
+      emit("LABEL", "_", "_", catchLabel);
     jj_consume_token(CATCH);
     Block();
+emit("LABEL", "_", "_", endLabel);
 }
 
 /* =================== FIN: Globales =================== */
@@ -864,7 +1880,7 @@ popVType(token);
 /* =================== INICIO: Variables =================== */
 
 /* ===== Declaración de variable o constante ===== */
-  final public void VarDecl() throws ParseException {Token id; Token kw; VType rhs;
+  final public void VarDecl() throws ParseException {Token id; Token kw; VType rhs; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String result;
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case VAR:{
       kw = jj_consume_token(VAR);
@@ -882,18 +1898,36 @@ popVType(token);
     id = jj_consume_token(IDENT);
 beginInit(id);
     jj_consume_token(IGUAL);
+beginExprCapture();
     Expresion();
-rhs = popVType(id);
+infix = endExprCapture();
+    postfix = toPostfix(infix);
+    savePostfixReport("VarDecl -> " + id.image, infix, postfix);
+
+    result = generateFromPostfix(postfix);
+    lastPlace = result;
+    emit("=", result, "_", id.image);
+
+    rhs = popVType(id);
     endInit(id);
     scopes.declareTyped(id, (kw.kind == VAR ? SymKind.VAR : SymKind.CONST), rhs);
 }
 
 /* ===== ReAsignación simple ===== */
-  final public void Assignment() throws ParseException {Token id; SymbolInfo info; VType rhs;
+  final public void Assignment() throws ParseException {Token id; SymbolInfo info; VType rhs; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String result;
     id = jj_consume_token(IDENT);
     jj_consume_token(IGUAL);
+beginExprCapture();
     Expresion();
-rhs = popVType(id);
+infix = endExprCapture();
+    postfix = toPostfix(infix);
+    savePostfixReport("Assignment -> " + id.image, infix, postfix);
+
+    result = generateFromPostfix(postfix);
+    lastPlace = result;
+    emit("=", result, "_", id.image);
+
+    rhs = popVType(id);
     info = scopes.resolve(id);
 
     if (info != null) {
@@ -911,7 +1945,7 @@ rhs = popVType(id);
 }
 
 /* ===== Asignación compuesta ===== */
-  final public void AssignmentCompound() throws ParseException {Token id; Token op; SymbolInfo info; VType rhs;
+  final public void AssignmentCompound() throws ParseException {Token id; Token op; SymbolInfo info; VType rhs; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String result; String t; String realOp;
     id = jj_consume_token(IDENT);
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case SUMAIGUAL:{
@@ -939,8 +1973,21 @@ rhs = popVType(id);
       jj_consume_token(-1);
       throw new ParseException();
     }
+beginExprCapture();
     Expresion();
-rhs = popVType(op);
+infix = endExprCapture();
+    postfix = toPostfix(infix);
+    savePostfixReport("AssignmentCompound -> " + id.image + " " + op.image, infix, postfix);
+
+    result = generateFromPostfix(postfix);
+    lastPlace = result;
+
+    realOp = compoundToBaseOp(op);
+    t = newTemp();
+    emit(realOp, id.image, result, t);
+    emit("=", t, "_", id.image);
+
+    rhs = popVType(op);
     info = scopes.resolve(id);
 
     if (info != null) {
@@ -957,9 +2004,17 @@ rhs = popVType(op);
 }
 
 /* ===== Sentencia de expresión: una expresión sola con "~" ===== */
-  final public void ExprStatement() throws ParseException {
+  final public void ExprStatement() throws ParseException {java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String result;
+beginExprCapture();
     Expresion();
-popVType(token);
+infix = endExprCapture();
+      postfix = toPostfix(infix);
+      savePostfixReport("ExprStatement", infix, postfix);
+
+      result = generateFromPostfix(postfix);
+      lastPlace = result;
+
+      popVType(token);
 }
 
 /** ===== Expresión con + y - de menor precedencia ===== */
@@ -991,6 +2046,7 @@ popVType(token);
         jj_consume_token(-1);
         throw new ParseException();
       }
+cap(op.image);
       Term();
 VType b = popVType(op);
       VType a = popVType(op);
@@ -1042,6 +2098,7 @@ VType b = popVType(op);
         jj_consume_token(-1);
         throw new ParseException();
       }
+cap(op.image);
       Factor();
 VType b = popVType(op);
       VType a = popVType(op);
@@ -1097,22 +2154,22 @@ VType b = popVType(op);
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case STRING:{
       t = jj_consume_token(STRING);
-pushVType(VType.STRING);
+cap(t.image); pushVType(VType.STRING);
       break;
       }
     case TRUE:{
       t = jj_consume_token(TRUE);
-pushVType(VType.BOOL);
+cap(t.image); pushVType(VType.BOOL);
       break;
       }
     case FALSE:{
       t = jj_consume_token(FALSE);
-pushVType(VType.BOOL);
+cap(t.image); pushVType(VType.BOOL);
       break;
       }
     case NULL:{
       t = jj_consume_token(NULL);
-pushVType(VType.NULL);
+cap(t.image); pushVType(VType.NULL);
       break;
       }
     default:
@@ -1137,8 +2194,10 @@ pushVType(VType.NULL);
         break label_6;
       }
       jj_consume_token(CORCHETEABRE);
+cap("[");
       Expresion();
       jj_consume_token(CORCHETECIERRA);
+cap("]");
 idxCount++;
 
         idxT = popVType(token);
@@ -1150,7 +2209,7 @@ if (called && idxCount > 0) {
         semanticError(token, "No se permite indexar el resultado de una llamada (ej: f()[0]) sin sistema de tipos.");
       }
 
-      baseT = popVType(token); // tipo del IDENT/call
+      baseT = popVType(token);
 
       if (idxCount == 0) {
         pushVType(baseT);
@@ -1161,7 +2220,7 @@ if (called && idxCount > 0) {
         } else if (baseT.k == VType.K.ARRAY) {
           pushVType(baseT.elem == null ? VType.UNKNOWN : baseT.elem);
         } else {
-          pushVType(baseT); // UNKNOWN/ERROR
+          pushVType(baseT);
         }
       }
 }
@@ -1169,6 +2228,7 @@ if (called && idxCount > 0) {
 /** ===== ArrayList: [ expr, expr, ... ] puede estar vacío ===== */
   final public void ArrayLiteral() throws ParseException {VType elemT = null; VType t;
     jj_consume_token(CORCHETEABRE);
+cap("[");
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case STRING:
     case TRUE:
@@ -1197,6 +2257,7 @@ t = popVType(token);
           break label_7;
         }
         jj_consume_token(COMA);
+cap(",");
         Expresion();
 t = popVType(token);
           if (elemT == null) elemT = t;
@@ -1209,22 +2270,25 @@ t = popVType(token);
       ;
     }
     jj_consume_token(CORCHETECIERRA);
-if (elemT == null) elemT = VType.UNKNOWN;   // [] vacío
+cap("]");
+if (elemT == null) elemT = VType.UNKNOWN;
     pushVType(VType.arrayOf(elemT));
 }
 
 /** ===== SignoNumerico: número o expresión entre paréntesis, con signo opcional ===== */
-  final public void SignoNumerico() throws ParseException {
+  final public void SignoNumerico() throws ParseException {Token s;
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case SUMA:
     case RESTA:{
       switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
       case SUMA:{
-        jj_consume_token(SUMA);
+        s = jj_consume_token(SUMA);
+cap(s.image);
         break;
         }
       case RESTA:{
-        jj_consume_token(RESTA);
+        s = jj_consume_token(RESTA);
+cap(s.image);
         break;
         }
       default:
@@ -1246,18 +2310,20 @@ if (elemT == null) elemT = VType.UNKNOWN;   // [] vacío
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case INT:{
       n = jj_consume_token(INT);
-pushVType(VType.INT);
+cap(n.image); pushVType(VType.INT);
       break;
       }
     case FLOAT:{
       n = jj_consume_token(FLOAT);
-pushVType(VType.FLOAT);
+cap(n.image); pushVType(VType.FLOAT);
       break;
       }
     case PARENABRE:{
       jj_consume_token(PARENABRE);
+cap("(");
       Expresion();
       jj_consume_token(PARENCIERRA);
+cap(")");
       break;
       }
     default:
@@ -1301,6 +2367,7 @@ pushVType(VType.FLOAT);
         jj_consume_token(-1);
         throw new ParseException();
       }
+cap(op.image);
       AndExpr();
 b = popVType(op);
       a = popVType(op);
@@ -1344,6 +2411,7 @@ b = popVType(op);
         jj_consume_token(-1);
         throw new ParseException();
       }
+cap(op.image);
       NotExpr();
 b = popVType(op);
       a = popVType(op);
@@ -1363,6 +2431,7 @@ b = popVType(op);
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case EXCLAMACION:{
       notTok = jj_consume_token(EXCLAMACION);
+cap(notTok.image);
       break;
       }
     default:
@@ -1389,18 +2458,20 @@ if (notTok != null) {
       switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
       case TRUE:{
         jj_consume_token(TRUE);
-pushVType(VType.BOOL);
+cap("true"); pushVType(VType.BOOL);
         break;
         }
       case FALSE:{
         jj_consume_token(FALSE);
-pushVType(VType.BOOL);
+cap("false"); pushVType(VType.BOOL);
         break;
         }
       case PARENABRE:{
         jj_consume_token(PARENABRE);
+cap("(");
         Condicion();
         jj_consume_token(PARENCIERRA);
+cap(")");
         break;
         }
       default:
@@ -1462,17 +2533,16 @@ pushVType(VType.BOOL);
   final public void Relacional() throws ParseException {Token op; VType b; VType a;
     Expresion();
     op = RelOp();
+cap(op.image);
     Expresion();
 b = popVType(op);
       a = popVType(op);
 
-      // <, >, <=, >= solo numéricos (pero UNKNOWN no debe cascadiar)
       if (op.kind == MENORQ || op.kind == MAYORQ || op.kind == MENORIGUAL || op.kind == MAYORIGUAL) {
 
         if (a.k == VType.K.ERROR || b.k == VType.K.ERROR) {
           pushVType(VType.ERROR);
         } else if (a.k == VType.K.UNKNOWN || b.k == VType.K.UNKNOWN) {
-          // No sabemos, pero no marcamos error para no cascadiar
           pushVType(VType.BOOL);
         } else if (!isNumeric(a) || !isNumeric(b)) {
           semanticError(op, "Comparaci\u00f3n '" + op.image + "' requiere num\u00e9ricos, pero recibi\u00f3 " + a + " y " + b + ".");
@@ -1482,7 +2552,6 @@ b = popVType(op);
         }
 
       } else {
-        // == o != : permitir comparar tipos iguales, numéricos entre sí, o null con cualquiera
         boolean ok =
             (a == VType.NULL || b == VType.NULL) ||
             (a == VType.UNKNOWN || b == VType.UNKNOWN) ||
@@ -1504,21 +2573,35 @@ b = popVType(op);
 /* =================== INICIO : Condicionales =================== */
 
 /* ===== Sentencia if / elif / else ===== */
-  final public void IfCond() throws ParseException {VType ct;
+  final public void IfCond() throws ParseException {VType ct; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String condRes; String falseLabel; String endLabel;
     jj_consume_token(IF);
     jj_consume_token(PARENABRE);
+beginExprCapture();
+      falseLabel = newLabel();
+      endLabel = newLabel();
     Condicion();
     jj_consume_token(PARENCIERRA);
-ct = popVType(token);
+infix = endExprCapture();
+      postfix = toPostfix(infix);
+      savePostfixReport("IfCond", infix, postfix);
+
+      condRes = generateFromPostfix(postfix);
+      lastPlace = condRes;
+      emit("IF_FALSE", condRes, "_", falseLabel);
+
+      ct = popVType(token);
       if (!isBool(ct) && ct != VType.UNKNOWN && ct != VType.ERROR) {
         semanticError(token, "La condici\u00f3n del if debe ser BOOL, pero fue " + ct + ".");
       }
     Block();
-    RestoIf();
+emit("GOTO", "_", "_", endLabel);
+      emit("LABEL", "_", "_", falseLabel);
+    RestoIf(endLabel);
+emit("LABEL", "_", "_", endLabel);
 }
 
 /* ===== Cadena de elif / else ===== */
-  final public void RestoIf() throws ParseException {VType ct;
+  final public void RestoIf(String endLabel) throws ParseException {VType ct; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String condRes; String falseLabel;
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case ELIF:
     case ELSE:{
@@ -1526,14 +2609,26 @@ ct = popVType(token);
       case ELIF:{
         jj_consume_token(ELIF);
         jj_consume_token(PARENABRE);
+beginExprCapture();
+          falseLabel = newLabel();
         Condicion();
         jj_consume_token(PARENCIERRA);
-ct = popVType(token);
+infix = endExprCapture();
+          postfix = toPostfix(infix);
+          savePostfixReport("ElifCond", infix, postfix);
+
+          condRes = generateFromPostfix(postfix);
+          lastPlace = condRes;
+          emit("IF_FALSE", condRes, "_", falseLabel);
+
+          ct = popVType(token);
           if (!isBool(ct) && ct != VType.UNKNOWN && ct != VType.ERROR) {
             semanticError(token, "La condici\u00f3n del elif debe ser BOOL, pero fue " + ct + ".");
           }
         Block();
-        RestoIf();
+emit("GOTO", "_", "_", endLabel);
+          emit("LABEL", "_", "_", falseLabel);
+        RestoIf(endLabel);
         break;
         }
       case ELSE:{
@@ -1560,46 +2655,70 @@ ct = popVType(token);
 /* =================== INICIO : Ciclos =================== */
 
 /* ===== Sentencia while ===== */
-  final public void WhileC() throws ParseException {VType ct;
+  final public void WhileC() throws ParseException {VType ct; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String condRes; String startLabel; String endLabel;
     jj_consume_token(WHILE);
+startLabel = newLabel();
+      endLabel = newLabel();
+      emit("LABEL", "_", "_", startLabel);
     jj_consume_token(PARENABRE);
+beginExprCapture();
     Condicion();
     jj_consume_token(PARENCIERRA);
-ct = popVType(token);
+infix = endExprCapture();
+      postfix = toPostfix(infix);
+      savePostfixReport("WhileCond", infix, postfix);
+
+      condRes = generateFromPostfix(postfix);
+      lastPlace = condRes;
+      emit("IF_FALSE", condRes, "_", endLabel);
+
+      ct = popVType(token);
       if (!isBool(ct) && ct != VType.UNKNOWN && ct != VType.ERROR) {
         semanticError(token, "La condici\u00f3n del while debe ser BOOL, pero fue " + ct + ".");
       }
+
       enterLoop();
+      pushLoopLabels(startLabel, endLabel);
     Block();
-exitLoop();
+emit("GOTO", "_", "_", startLabel);
+      emit("LABEL", "_", "_", endLabel);
+
+      popLoopLabels();
+      exitLoop();
 }
 
 /* ===== Sentencia break ===== */
-  final public void BreakC() throws ParseException {Token b;
+  final public void BreakC() throws ParseException {Token b; String target;
     b = jj_consume_token(BREAK);
 if (!inLoop()) {
         semanticError(b, "Uso de 'break' fuera de un ciclo (for/while).");
+      } else {
+        target = currentBreakLabel();
+        if (target != null) emit("GOTO", "_", "_", target);
       }
 }
 
 /* ===== Sentencia continue ===== */
-  final public void ContinueC() throws ParseException {Token c;
+  final public void ContinueC() throws ParseException {Token c; String target;
     c = jj_consume_token(CONTINUE);
 if (!inLoop()) {
         semanticError(c, "Uso de 'continuar' fuera de un ciclo (for/while).");
+      } else {
+        target = currentContinueLabel();
+        if (target != null) emit("GOTO", "_", "_", target);
       }
 }
 
 /* ===== Incremento-Decremento: i++ i-- ===== */
-  final public void IncDecSimple() throws ParseException {Token id; SymbolInfo info;
+  final public void IncDecSimple() throws ParseException {Token id; Token op; SymbolInfo info; String t;
     id = jj_consume_token(IDENT);
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case SUMAMAS:{
-      jj_consume_token(SUMAMAS);
+      op = jj_consume_token(SUMAMAS);
       break;
       }
     case RESTAMENOS:{
-      jj_consume_token(RESTAMENOS);
+      op = jj_consume_token(RESTAMENOS);
       break;
       }
     default:
@@ -1608,13 +2727,27 @@ if (!inLoop()) {
       throw new ParseException();
     }
 info = scopes.resolve(id);
+
       if (info != null && info.isConst()) {
         semanticError(id, "No se puede incrementar/decrementar la constante '" + id.image + "'.");
+      }
+
+      if (info != null) {
+        t = newTemp();
+
+        if (op.kind == SUMAMAS) {
+          emit("+", id.image, "1", t);
+        } else {
+          emit("-", id.image, "1", t);
+        }
+
+        emit("=", t, "_", id.image);
+        lastPlace = id.image;
       }
 }
 
 /* ===== Declaración sin FIN (para el for) ===== */
-  final public void VarDeclNoFin() throws ParseException {Token id; Token kw; VType rhs;
+  final public void VarDeclNoFin() throws ParseException {Token id; Token kw; VType rhs; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String result;
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case VAR:{
       kw = jj_consume_token(VAR);
@@ -1632,19 +2765,37 @@ info = scopes.resolve(id);
     id = jj_consume_token(IDENT);
 beginInit(id);
     jj_consume_token(IGUAL);
+beginExprCapture();
     Expresion();
-rhs = popVType(id);
+infix = endExprCapture();
+      postfix = toPostfix(infix);
+      savePostfixReport("VarDeclNoFin -> " + id.image, infix, postfix);
+
+      result = generateFromPostfix(postfix);
+      lastPlace = result;
+      emit("=", result, "_", id.image);
+
+      rhs = popVType(id);
       endInit(id);
 
       scopes.declareTyped(id, (kw.kind == VAR ? SymKind.VAR : SymKind.CONST), rhs);
 }
 
 /* ===== Asignación sin FIN (para el for) ===== */
-  final public void AssignmentNoFin() throws ParseException {Token id; SymbolInfo info; VType rhs;
+  final public void AssignmentNoFin() throws ParseException {Token id; SymbolInfo info; VType rhs; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String result;
     id = jj_consume_token(IDENT);
     jj_consume_token(IGUAL);
+beginExprCapture();
     Expresion();
-rhs = popVType(id);
+infix = endExprCapture();
+      postfix = toPostfix(infix);
+      savePostfixReport("AssignmentNoFin -> " + id.image, infix, postfix);
+
+      result = generateFromPostfix(postfix);
+      lastPlace = result;
+      emit("=", result, "_", id.image);
+
+      rhs = popVType(id);
 
       info = scopes.resolve(id);
       if (info != null) {
@@ -1660,7 +2811,7 @@ rhs = popVType(id);
 }
 
 /* ===== Asignaión Compuesta (para el for) sin FIN ===== */
-  final public void AssignmentCompoundNoFin() throws ParseException {Token id; Token op; SymbolInfo info; VType rhs; VType lhs;
+  final public void AssignmentCompoundNoFin() throws ParseException {Token id; Token op; SymbolInfo info; VType rhs; VType lhs; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String result; String t; String realOp;
     id = jj_consume_token(IDENT);
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case SUMAIGUAL:{
@@ -1688,33 +2839,36 @@ rhs = popVType(id);
       jj_consume_token(-1);
       throw new ParseException();
     }
+beginExprCapture();
     Expresion();
-// sacar el tipo del lado derecho (para no dejar basura en la pila)
+infix = endExprCapture();
+      postfix = toPostfix(infix);
+      savePostfixReport("AssignmentCompoundNoFin -> " + id.image + " " + op.image, infix, postfix);
+
+      result = generateFromPostfix(postfix);
+      lastPlace = result;
+
+      realOp = compoundToBaseOp(op);
+      t = newTemp();
+      emit(realOp, id.image, result, t);
+      emit("=", t, "_", id.image);
+
       rhs = popVType(op);
 
-      // validar que el identificador exista
-      info = scopes.resolve(id); // si no existe, aquí ya marca error
+      info = scopes.resolve(id);
       if (info != null) {
-
-        // no permitir sobre constantes
         if (info.isConst()) {
           semanticError(id, "No se puede aplicar '" + op.image + "' a la constante '" + id.image + "'.");
         } else {
-
           lhs = info.type;
 
-          // validación de tipos
-          // si alguno es UNKNOWN/ERROR no bloqueamos para no cascadiar errores
           if (lhs != VType.UNKNOWN && rhs != VType.UNKNOWN && lhs != VType.ERROR && rhs != VType.ERROR) {
-
             if (!isNumeric(lhs) || !isNumeric(rhs)) {
               semanticError(op,
                 "Operaci\u00f3n '" + op.image + "' requiere num\u00e9ricos, pero '" + id.image +
                 "' es " + lhs + " y RHS es " + rhs + "."
               );
-            }
-
-            else if (lhs == VType.INT && rhs == VType.FLOAT) {
+            } else if (lhs == VType.INT && rhs == VType.FLOAT) {
               semanticError(op,
                 "No se puede aplicar '" + op.image + "' porque '" + id.image +
                 "' es INT y RHS es FLOAT (pierde precisi\u00f3n)."
@@ -1765,30 +2919,52 @@ rhs = popVType(id);
 }
 
 /* ===== Condición del for: para validar semántica ===== */
-  final public void CondicionFor() throws ParseException {VType ct;
+  final public void CondicionFor() throws ParseException {VType ct; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String condRes;
+beginExprCapture();
     Condicion();
-ct = popVType(token);
+infix = endExprCapture();
+      postfix = toPostfix(infix);
+      savePostfixReport("CondicionFor", infix, postfix);
+
+      condRes = generateFromPostfix(postfix);
+      lastPlace = condRes;
+
+      ct = popVType(token);
       if (!isBool(ct) && ct != VType.UNKNOWN && ct != VType.ERROR) {
         semanticError(token, "La condici\u00f3n del for debe ser BOOL, pero fue " + ct + ".");
       }
 }
 
 /* ===== Sentencia for ===== */
-  final public void ForC() throws ParseException {
+  final public void ForC() throws ParseException {String startLabel; String continueLabel; String endLabel; java.util.ArrayList<Quad> upd;
     jj_consume_token(FOR);
 scopes.enterScope();
-      enterLoop();
     jj_consume_token(PARENABRE);
     ForInit();
     jj_consume_token(PUNTOCOMA);
+startLabel = newLabel();
+        continueLabel = newLabel();
+        endLabel = newLabel();
+        emit("LABEL", "_", "_", startLabel);
     CondicionFor();
+emit("IF_FALSE", lastPlace, "_", endLabel);
+        beginQuadBuffer();
     jj_consume_token(PUNTOCOMA);
     ForUpdate();
+upd = endQuadBuffer();
+        upd = optimizarActualizacionFor(upd); // Optimización de ciclos: reduce cuádruplos de actualización del for
+        enterLoop();
+        pushLoopLabels(continueLabel, endLabel);
     jj_consume_token(PARENCIERRA);
     Block();
-exitLoop();
-      scopes.exitScope(token); // cerrar scope del for
+emit("LABEL", "_", "_", continueLabel);
+      appendQuads(upd);
+      emit("GOTO", "_", "_", startLabel);
+      emit("LABEL", "_", "_", endLabel);
 
+      popLoopLabels();
+      exitLoop();
+      scopes.exitScope(token);
 }
 
 /* =================== FIN : Ciclos =================== */
@@ -1797,7 +2973,7 @@ exitLoop();
 /* =================== INICIO : Funciones =================== */
 
 /* ===== Sentencia return ===== */
-  final public void ReturnC() throws ParseException {Token r; VType rt;
+  final public void ReturnC() throws ParseException {Token r; VType rt; java.util.ArrayList<String> infix; java.util.ArrayList<String> postfix; String result;
     r = jj_consume_token(RETURN);
     switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
     case STRING:
@@ -1811,8 +2987,17 @@ exitLoop();
     case RESTA:
     case PARENABRE:
     case CORCHETEABRE:{
+beginExprCapture();
       Expresion();
-rt = popVType(r);
+infix = endExprCapture();
+        postfix = toPostfix(infix);
+        savePostfixReport("Return", infix, postfix);
+
+        result = generateFromPostfix(postfix);
+        lastPlace = result;
+        emit("RETURN", result, "_", "_");
+
+        rt = popVType(r);
       break;
       }
     default:
@@ -1821,6 +3006,9 @@ rt = popVType(r);
     }
 if (!inFunc()) {
         semanticError(r, "Uso de 'return' fuera de una funci\u00f3n.");
+      }
+      if (r != null && (token == null || token.image == null)) {
+        // no-op
       }
 }
 
@@ -1886,14 +3074,13 @@ scopes.exitScope(token);
       ;
     }
     jj_consume_token(PARENCIERRA);
-// Validar params duplicados (sin detener el parseo)
-      validateNoDuplicateParams(params, name);
-
-      // Registrar función con aridad
+validateNoDuplicateParams(params, name);
       scopes.declareFunc(name, params.size());
+      emit("FUNC_BEGIN", name.image, String.valueOf(params.size()), "_");
       enterFunc();
     FuncBlock(params);
-exitFunc();
+emit("FUNC_END", name.image, "_", "_");
+      exitFunc();
 }
 
 /* ===== Lista de argumentos en una llamada ===== */
@@ -1912,6 +3099,7 @@ popVType(token); n = 1;
         break label_12;
       }
       jj_consume_token(COMA);
+cap(",");
       Expresion();
 popVType(token); n++;
     }
@@ -1926,6 +3114,9 @@ popVType(token); n++;
     case PARENABRE:{
       jj_consume_token(PARENABRE);
 isCall = true;
+        cap("@CALL");
+        cap(id.image);
+        cap("(");
       switch ((jj_ntk==-1)?jj_ntk_f():jj_ntk) {
       case STRING:
       case TRUE:
@@ -1946,13 +3137,18 @@ isCall = true;
         ;
       }
       jj_consume_token(PARENCIERRA);
+cap(")");
       break;
       }
     default:
       jj_la1[36] = jj_gen;
       ;
     }
-info = scopes.resolve(id);
+if (!isCall) {
+        cap(id.image);
+      }
+
+      info = scopes.resolve(id);
       if (info != null) {
         if (isCall) {
           if (!info.isFunc()) {
@@ -1969,13 +3165,12 @@ info = scopes.resolve(id);
         }
       }
 
-      //PILA SEMÁNTICA: empujar tipo del IDENT o de la llamada
       if (info == null) {
         pushVType(VType.ERROR);
       } else if (isCall) {
         pushVType(VType.UNKNOWN);
       } else {
-        pushVType(info.type);      // var/const/param
+        pushVType(info.type);
       }
 
       {if ("" != null) return isCall;}
@@ -2030,244 +3225,56 @@ info = scopes.resolve(id);
     finally { jj_save(5, xla); }
   }
 
-  private boolean jj_3R_Factor_928_18_31()
- {
-    if (jj_3R_SignoNumerico_1010_5_35()) return true;
-    return false;
-  }
-
-  private boolean jj_3R_Literal_938_5_41()
- {
-    if (jj_scan_token(NULL)) return true;
-    return false;
-  }
-
-  private boolean jj_3R_Literal_937_5_40()
- {
-    if (jj_scan_token(FALSE)) return true;
-    return false;
-  }
-
-  private boolean jj_3R_AssignmentCompound_843_3_14()
- {
-    if (jj_scan_token(IDENT)) return true;
-    Token xsp;
-    xsp = jj_scanpos;
-    if (jj_scan_token(56)) {
-    jj_scanpos = xsp;
-    if (jj_scan_token(57)) {
-    jj_scanpos = xsp;
-    if (jj_scan_token(58)) {
-    jj_scanpos = xsp;
-    if (jj_scan_token(59)) {
-    jj_scanpos = xsp;
-    if (jj_scan_token(60)) return true;
-    }
-    }
-    }
-    }
-    if (jj_3R_Expresion_876_3_18()) return true;
-    return false;
-  }
-
-  private boolean jj_3R_Literal_936_5_39()
- {
-    if (jj_scan_token(TRUE)) return true;
-    return false;
-  }
-
-  private boolean jj_3R_Literal_935_5_34()
- {
-    Token xsp;
-    xsp = jj_scanpos;
-    if (jj_3R_Literal_935_5_38()) {
-    jj_scanpos = xsp;
-    if (jj_3R_Literal_936_5_39()) {
-    jj_scanpos = xsp;
-    if (jj_3R_Literal_937_5_40()) {
-    jj_scanpos = xsp;
-    if (jj_3R_Literal_938_5_41()) return true;
-    }
-    }
-    }
-    return false;
-  }
-
-  private boolean jj_3R_Literal_935_5_38()
- {
-    if (jj_scan_token(STRING)) return true;
-    return false;
-  }
-
-  private boolean jj_3R_Factor_928_6_28()
- {
-    Token xsp;
-    xsp = jj_scanpos;
-    if (jj_3R_Factor_928_6_30()) {
-    jj_scanpos = xsp;
-    if (jj_3R_Factor_928_18_31()) {
-    jj_scanpos = xsp;
-    if (jj_3R_Factor_928_36_32()) {
-    jj_scanpos = xsp;
-    if (jj_3R_Factor_928_50_33()) return true;
-    }
-    }
-    }
-    return false;
-  }
-
-  private boolean jj_3R_Factor_928_6_30()
- {
-    if (jj_3R_Literal_935_5_34()) return true;
-    return false;
-  }
-
-  private boolean jj_3R_RelacionalStart_1117_5_16()
- {
-    if (jj_3R_Expresion_876_3_18()) return true;
-    if (jj_3R_RelOp_1105_5_19()) return true;
-    return false;
-  }
-
-  private boolean jj_3R_AssignmentCompoundNoFin_1305_5_17()
- {
-    if (jj_scan_token(IDENT)) return true;
-    Token xsp;
-    xsp = jj_scanpos;
-    if (jj_scan_token(56)) {
-    jj_scanpos = xsp;
-    if (jj_scan_token(57)) {
-    jj_scanpos = xsp;
-    if (jj_scan_token(58)) {
-    jj_scanpos = xsp;
-    if (jj_scan_token(59)) {
-    jj_scanpos = xsp;
-    if (jj_scan_token(60)) return true;
-    }
-    }
-    }
-    }
-    if (jj_3R_Expresion_876_3_18()) return true;
-    return false;
-  }
-
-  private boolean jj_3R_Numerico_1019_5_49()
- {
-    if (jj_scan_token(PARENABRE)) return true;
-    if (jj_3R_Expresion_876_3_18()) return true;
-    if (jj_scan_token(PARENCIERRA)) return true;
-    return false;
-  }
-
-  private boolean jj_3R_Numerico_1018_5_48()
- {
-    if (jj_scan_token(FLOAT)) return true;
-    return false;
-  }
-
-  private boolean jj_3R_Numerico_1017_5_47()
- {
-    if (jj_scan_token(INT)) return true;
-    return false;
-  }
-
-  private boolean jj_3R_Numerico_1017_5_43()
- {
-    Token xsp;
-    xsp = jj_scanpos;
-    if (jj_3R_Numerico_1017_5_47()) {
-    jj_scanpos = xsp;
-    if (jj_3R_Numerico_1018_5_48()) {
-    jj_scanpos = xsp;
-    if (jj_3R_Numerico_1019_5_49()) return true;
-    }
-    }
-    return false;
-  }
-
-  private boolean jj_3_4()
- {
-    if (jj_3R_RelacionalStart_1117_5_16()) return true;
-    return false;
-  }
-
-  private boolean jj_3R_RelOp_1110_5_27()
- {
-    if (jj_scan_token(MAYORQ)) return true;
-    return false;
-  }
-
-  private boolean jj_3R_RelOp_1109_5_26()
- {
-    if (jj_scan_token(MENORQ)) return true;
-    return false;
-  }
-
-  private boolean jj_3R_RelOp_1108_5_25()
- {
-    if (jj_scan_token(MAYORIGUAL)) return true;
-    return false;
-  }
-
-  private boolean jj_3R_SignoNumerico_1010_7_42()
- {
-    Token xsp;
-    xsp = jj_scanpos;
-    if (jj_scan_token(40)) {
-    jj_scanpos = xsp;
-    if (jj_scan_token(41)) return true;
-    }
-    return false;
-  }
-
-  private boolean jj_3R_RelOp_1107_5_24()
+  private boolean jj_3R_RelOp_2179_5_24()
  {
     if (jj_scan_token(MENORIGUAL)) return true;
     return false;
   }
 
-  private boolean jj_3R_RelOp_1106_5_23()
+  private boolean jj_3R_RelOp_2178_5_23()
  {
     if (jj_scan_token(DISTINTO)) return true;
     return false;
   }
 
-  private boolean jj_3R_IdentOrCall_1481_9_52()
+  private boolean jj_3R_SignoNumerico_2080_7_47()
  {
-    if (jj_3R_ArgList_1466_5_53()) return true;
+    if (jj_scan_token(SUMA)) return true;
     return false;
   }
 
-  private boolean jj_3R_SignoNumerico_1010_5_35()
+  private boolean jj_3R_SignoNumerico_2080_7_42()
  {
     Token xsp;
     xsp = jj_scanpos;
-    if (jj_3R_SignoNumerico_1010_7_42()) jj_scanpos = xsp;
-    if (jj_3R_Numerico_1017_5_43()) return true;
+    if (jj_3R_SignoNumerico_2080_7_47()) {
+    jj_scanpos = xsp;
+    if (jj_3R_SignoNumerico_2080_36_48()) return true;
+    }
     return false;
   }
 
-  private boolean jj_3R_RelOp_1105_5_22()
+  private boolean jj_3R_RelOp_2177_5_22()
  {
     if (jj_scan_token(IGUALIGUAL)) return true;
     return false;
   }
 
-  private boolean jj_3R_RelOp_1105_5_19()
+  private boolean jj_3R_RelOp_2177_5_19()
  {
     Token xsp;
     xsp = jj_scanpos;
-    if (jj_3R_RelOp_1105_5_22()) {
+    if (jj_3R_RelOp_2177_5_22()) {
     jj_scanpos = xsp;
-    if (jj_3R_RelOp_1106_5_23()) {
+    if (jj_3R_RelOp_2178_5_23()) {
     jj_scanpos = xsp;
-    if (jj_3R_RelOp_1107_5_24()) {
+    if (jj_3R_RelOp_2179_5_24()) {
     jj_scanpos = xsp;
-    if (jj_3R_RelOp_1108_5_25()) {
+    if (jj_3R_RelOp_2180_5_25()) {
     jj_scanpos = xsp;
-    if (jj_3R_RelOp_1109_5_26()) {
+    if (jj_3R_RelOp_2181_5_26()) {
     jj_scanpos = xsp;
-    if (jj_3R_RelOp_1110_5_27()) return true;
+    if (jj_3R_RelOp_2182_5_27()) return true;
     }
     }
     }
@@ -2276,52 +3283,50 @@ info = scopes.resolve(id);
     return false;
   }
 
-  private boolean jj_3R_Assignment_817_3_15()
+  private boolean jj_3R_SignoNumerico_2080_5_35()
  {
-    if (jj_scan_token(IDENT)) return true;
-    if (jj_scan_token(IGUAL)) return true;
-    if (jj_3R_Expresion_876_3_18()) return true;
-    return false;
-  }
-
-  private boolean jj_3R_IdentOrCall_1477_7_50()
- {
-    if (jj_scan_token(PARENABRE)) return true;
     Token xsp;
     xsp = jj_scanpos;
-    if (jj_3R_IdentOrCall_1481_9_52()) jj_scanpos = xsp;
-    if (jj_scan_token(PARENCIERRA)) return true;
+    if (jj_3R_SignoNumerico_2080_7_42()) jj_scanpos = xsp;
+    if (jj_3R_Numerico_2087_5_43()) return true;
     return false;
   }
 
-  private boolean jj_3_3()
- {
-    if (jj_3R_Assignment_817_3_15()) return true;
-    return false;
-  }
-
-  private boolean jj_3R_IdentOrCall_1475_5_44()
+  private boolean jj_3R_AssignmentCompound_1888_3_14()
  {
     if (jj_scan_token(IDENT)) return true;
     Token xsp;
     xsp = jj_scanpos;
-    if (jj_3R_IdentOrCall_1477_7_50()) jj_scanpos = xsp;
+    if (jj_scan_token(56)) {
+    jj_scanpos = xsp;
+    if (jj_scan_token(57)) {
+    jj_scanpos = xsp;
+    if (jj_scan_token(58)) {
+    jj_scanpos = xsp;
+    if (jj_scan_token(59)) {
+    jj_scanpos = xsp;
+    if (jj_scan_token(60)) return true;
+    }
+    }
+    }
+    }
+    if (jj_3R_Expresion_1944_3_18()) return true;
     return false;
   }
 
-  private boolean jj_3_2()
+  private boolean jj_3_6()
  {
-    if (jj_3R_AssignmentCompound_843_3_14()) return true;
+    if (jj_3R_AssignmentCompoundNoFin_2477_5_17()) return true;
     return false;
   }
 
-  private boolean jj_3_1()
+  private boolean jj_3_5()
  {
-    if (jj_3R_IncDecSimple_1249_5_13()) return true;
+    if (jj_3R_IncDecSimple_2389_5_13()) return true;
     return false;
   }
 
-  private boolean jj_3R_Term_904_5_29()
+  private boolean jj_3R_Term_1973_5_29()
  {
     Token xsp;
     xsp = jj_scanpos;
@@ -2332,80 +3337,70 @@ info = scopes.resolve(id);
     if (jj_scan_token(44)) return true;
     }
     }
-    if (jj_3R_Factor_928_6_28()) return true;
+    if (jj_3R_Factor_1998_6_28()) return true;
     return false;
   }
 
-  private boolean jj_3R_ArrayLiteral_991_9_51()
+  private boolean jj_3R_ArrayLiteral_2061_9_53()
  {
     if (jj_scan_token(COMA)) return true;
-    if (jj_3R_Expresion_876_3_18()) return true;
+    if (jj_3R_Expresion_1944_3_18()) return true;
     return false;
   }
 
-  private boolean jj_3R_Term_902_3_20()
+  private boolean jj_3R_Term_1971_3_20()
  {
-    if (jj_3R_Factor_928_6_28()) return true;
+    if (jj_3R_Factor_1998_6_28()) return true;
     Token xsp;
     while (true) {
       xsp = jj_scanpos;
-      if (jj_3R_Term_904_5_29()) { jj_scanpos = xsp; break; }
+      if (jj_3R_Term_1973_5_29()) { jj_scanpos = xsp; break; }
     }
     return false;
   }
 
-  private boolean jj_3R_ArgList_1467_7_54()
+  private boolean jj_3R_ArrayLiteral_2055_7_46()
  {
-    if (jj_scan_token(COMA)) return true;
-    if (jj_3R_Expresion_876_3_18()) return true;
-    return false;
-  }
-
-  private boolean jj_3R_ArgList_1466_5_53()
- {
-    if (jj_3R_Expresion_876_3_18()) return true;
+    if (jj_3R_Expresion_1944_3_18()) return true;
     Token xsp;
     while (true) {
       xsp = jj_scanpos;
-      if (jj_3R_ArgList_1467_7_54()) { jj_scanpos = xsp; break; }
+      if (jj_3R_ArrayLiteral_2061_9_53()) { jj_scanpos = xsp; break; }
     }
     return false;
   }
 
-  private boolean jj_3_6()
- {
-    if (jj_3R_AssignmentCompoundNoFin_1305_5_17()) return true;
-    return false;
-  }
-
-  private boolean jj_3_5()
- {
-    if (jj_3R_IncDecSimple_1249_5_13()) return true;
-    return false;
-  }
-
-  private boolean jj_3R_ArrayLiteral_985_7_46()
- {
-    if (jj_3R_Expresion_876_3_18()) return true;
-    Token xsp;
-    while (true) {
-      xsp = jj_scanpos;
-      if (jj_3R_ArrayLiteral_991_9_51()) { jj_scanpos = xsp; break; }
-    }
-    return false;
-  }
-
-  private boolean jj_3R_ArrayLiteral_983_3_37()
+  private boolean jj_3R_ArrayLiteral_2053_3_37()
  {
     if (jj_scan_token(CORCHETEABRE)) return true;
     Token xsp;
     xsp = jj_scanpos;
-    if (jj_3R_ArrayLiteral_985_7_46()) jj_scanpos = xsp;
+    if (jj_3R_ArrayLiteral_2055_7_46()) jj_scanpos = xsp;
     if (jj_scan_token(CORCHETECIERRA)) return true;
     return false;
   }
 
-  private boolean jj_3R_Expresion_878_5_21()
+  private boolean jj_3R_IdentOrCall_2708_9_54()
+ {
+    if (jj_3R_ArgList_2690_5_55()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_Factor_1998_50_33()
+ {
+    if (jj_3R_ArrayLiteral_2053_3_37()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_Assignment_1853_3_15()
+ {
+    if (jj_scan_token(IDENT)) return true;
+    if (jj_scan_token(IGUAL)) return true;
+    if (jj_3R_Expresion_1944_3_18()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_Expresion_1946_5_21()
  {
     Token xsp;
     xsp = jj_scanpos;
@@ -2413,28 +3408,96 @@ info = scopes.resolve(id);
     jj_scanpos = xsp;
     if (jj_scan_token(41)) return true;
     }
-    if (jj_3R_Term_902_3_20()) return true;
+    if (jj_3R_Term_1971_3_20()) return true;
     return false;
   }
 
-  private boolean jj_3R_Factor_928_50_33()
+  private boolean jj_3R_IdentOrCall_2701_7_52()
  {
-    if (jj_3R_ArrayLiteral_983_3_37()) return true;
+    if (jj_scan_token(PARENABRE)) return true;
+    Token xsp;
+    xsp = jj_scanpos;
+    if (jj_3R_IdentOrCall_2708_9_54()) jj_scanpos = xsp;
+    if (jj_scan_token(PARENCIERRA)) return true;
     return false;
   }
 
-  private boolean jj_3R_Expresion_876_3_18()
+  private boolean jj_3R_Expresion_1944_3_18()
  {
-    if (jj_3R_Term_902_3_20()) return true;
+    if (jj_3R_Term_1971_3_20()) return true;
     Token xsp;
     while (true) {
       xsp = jj_scanpos;
-      if (jj_3R_Expresion_878_5_21()) { jj_scanpos = xsp; break; }
+      if (jj_3R_Expresion_1946_5_21()) { jj_scanpos = xsp; break; }
     }
     return false;
   }
 
-  private boolean jj_3R_IncDecSimple_1249_5_13()
+  private boolean jj_3R_IdentOrCall_2699_5_44()
+ {
+    if (jj_scan_token(IDENT)) return true;
+    Token xsp;
+    xsp = jj_scanpos;
+    if (jj_3R_IdentOrCall_2701_7_52()) jj_scanpos = xsp;
+    return false;
+  }
+
+  private boolean jj_3R_Factor_1998_36_32()
+ {
+    if (jj_3R_Indexable_2015_5_36()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_ArgList_2691_7_56()
+ {
+    if (jj_scan_token(COMA)) return true;
+    if (jj_3R_Expresion_1944_3_18()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_ArgList_2690_5_55()
+ {
+    if (jj_3R_Expresion_1944_3_18()) return true;
+    Token xsp;
+    while (true) {
+      xsp = jj_scanpos;
+      if (jj_3R_ArgList_2691_7_56()) { jj_scanpos = xsp; break; }
+    }
+    return false;
+  }
+
+  private boolean jj_3R_Indexable_2017_7_45()
+ {
+    if (jj_scan_token(CORCHETEABRE)) return true;
+    if (jj_3R_Expresion_1944_3_18()) return true;
+    if (jj_scan_token(CORCHETECIERRA)) return true;
+    return false;
+  }
+
+  private boolean jj_3R_SignoNumerico_2080_36_48()
+ {
+    if (jj_scan_token(RESTA)) return true;
+    return false;
+  }
+
+  private boolean jj_3R_Indexable_2015_5_36()
+ {
+    if (jj_3R_IdentOrCall_2699_5_44()) return true;
+    Token xsp;
+    while (true) {
+      xsp = jj_scanpos;
+      if (jj_3R_Indexable_2017_7_45()) { jj_scanpos = xsp; break; }
+    }
+    return false;
+  }
+
+  private boolean jj_3R_Factor_1998_18_31()
+ {
+    if (jj_3R_SignoNumerico_2080_5_35()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_IncDecSimple_2389_5_13()
  {
     if (jj_scan_token(IDENT)) return true;
     Token xsp;
@@ -2446,28 +3509,172 @@ info = scopes.resolve(id);
     return false;
   }
 
-  private boolean jj_3R_Factor_928_36_32()
+  private boolean jj_3R_Literal_2008_5_41()
  {
-    if (jj_3R_Indexable_945_5_36()) return true;
+    if (jj_scan_token(NULL)) return true;
     return false;
   }
 
-  private boolean jj_3R_Indexable_947_7_45()
+  private boolean jj_3R_Literal_2007_5_40()
  {
-    if (jj_scan_token(CORCHETEABRE)) return true;
-    if (jj_3R_Expresion_876_3_18()) return true;
-    if (jj_scan_token(CORCHETECIERRA)) return true;
+    if (jj_scan_token(FALSE)) return true;
     return false;
   }
 
-  private boolean jj_3R_Indexable_945_5_36()
+  private boolean jj_3R_Literal_2006_5_39()
  {
-    if (jj_3R_IdentOrCall_1475_5_44()) return true;
+    if (jj_scan_token(TRUE)) return true;
+    return false;
+  }
+
+  private boolean jj_3R_Literal_2005_5_34()
+ {
     Token xsp;
-    while (true) {
-      xsp = jj_scanpos;
-      if (jj_3R_Indexable_947_7_45()) { jj_scanpos = xsp; break; }
+    xsp = jj_scanpos;
+    if (jj_3R_Literal_2005_5_38()) {
+    jj_scanpos = xsp;
+    if (jj_3R_Literal_2006_5_39()) {
+    jj_scanpos = xsp;
+    if (jj_3R_Literal_2007_5_40()) {
+    jj_scanpos = xsp;
+    if (jj_3R_Literal_2008_5_41()) return true;
     }
+    }
+    }
+    return false;
+  }
+
+  private boolean jj_3R_Literal_2005_5_38()
+ {
+    if (jj_scan_token(STRING)) return true;
+    return false;
+  }
+
+  private boolean jj_3_3()
+ {
+    if (jj_3R_Assignment_1853_3_15()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_AssignmentCompoundNoFin_2477_5_17()
+ {
+    if (jj_scan_token(IDENT)) return true;
+    Token xsp;
+    xsp = jj_scanpos;
+    if (jj_scan_token(56)) {
+    jj_scanpos = xsp;
+    if (jj_scan_token(57)) {
+    jj_scanpos = xsp;
+    if (jj_scan_token(58)) {
+    jj_scanpos = xsp;
+    if (jj_scan_token(59)) {
+    jj_scanpos = xsp;
+    if (jj_scan_token(60)) return true;
+    }
+    }
+    }
+    }
+    if (jj_3R_Expresion_1944_3_18()) return true;
+    return false;
+  }
+
+  private boolean jj_3_2()
+ {
+    if (jj_3R_AssignmentCompound_1888_3_14()) return true;
+    return false;
+  }
+
+  private boolean jj_3_1()
+ {
+    if (jj_3R_IncDecSimple_2389_5_13()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_Factor_1998_6_28()
+ {
+    Token xsp;
+    xsp = jj_scanpos;
+    if (jj_3R_Factor_1998_6_30()) {
+    jj_scanpos = xsp;
+    if (jj_3R_Factor_1998_18_31()) {
+    jj_scanpos = xsp;
+    if (jj_3R_Factor_1998_36_32()) {
+    jj_scanpos = xsp;
+    if (jj_3R_Factor_1998_50_33()) return true;
+    }
+    }
+    }
+    return false;
+  }
+
+  private boolean jj_3R_Factor_1998_6_30()
+ {
+    if (jj_3R_Literal_2005_5_34()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_RelacionalStart_2189_5_16()
+ {
+    if (jj_3R_Expresion_1944_3_18()) return true;
+    if (jj_3R_RelOp_2177_5_19()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_Numerico_2089_5_51()
+ {
+    if (jj_scan_token(PARENABRE)) return true;
+    if (jj_3R_Expresion_1944_3_18()) return true;
+    if (jj_scan_token(PARENCIERRA)) return true;
+    return false;
+  }
+
+  private boolean jj_3R_Numerico_2088_5_50()
+ {
+    if (jj_scan_token(FLOAT)) return true;
+    return false;
+  }
+
+  private boolean jj_3R_Numerico_2087_5_49()
+ {
+    if (jj_scan_token(INT)) return true;
+    return false;
+  }
+
+  private boolean jj_3R_Numerico_2087_5_43()
+ {
+    Token xsp;
+    xsp = jj_scanpos;
+    if (jj_3R_Numerico_2087_5_49()) {
+    jj_scanpos = xsp;
+    if (jj_3R_Numerico_2088_5_50()) {
+    jj_scanpos = xsp;
+    if (jj_3R_Numerico_2089_5_51()) return true;
+    }
+    }
+    return false;
+  }
+
+  private boolean jj_3_4()
+ {
+    if (jj_3R_RelacionalStart_2189_5_16()) return true;
+    return false;
+  }
+
+  private boolean jj_3R_RelOp_2182_5_27()
+ {
+    if (jj_scan_token(MAYORQ)) return true;
+    return false;
+  }
+
+  private boolean jj_3R_RelOp_2181_5_26()
+ {
+    if (jj_scan_token(MENORQ)) return true;
+    return false;
+  }
+
+  private boolean jj_3R_RelOp_2180_5_25()
+ {
+    if (jj_scan_token(MAYORIGUAL)) return true;
     return false;
   }
 

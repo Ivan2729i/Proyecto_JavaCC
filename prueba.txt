@@ -3,7 +3,7 @@
 const LIM = 5~
 const META = 80~      
 const MIN_APROB = 70~ 
-
+//const if = 70~ 
 // Arreglo con calificaciones iniciales
 var calificaciones = [80, 60, 90, 75, 50]~
 
@@ -11,7 +11,7 @@ var calificaciones = [80, 60, 90, 75, 50]~
 // ================== Funciones ==================
 
 // Calcula el promedio 
-deff promedio (lista) {
+def promedio (lista) {
     var i = 0~
     var suma = 0~
 
@@ -24,12 +24,12 @@ deff promedio (lista) {
 }
 
 
-df maximo (lista) {
+def maximo (lista) {
     var i = 1~
     var max = lista[0]~
 
-    whilee (i > LIM) {
-        iff (lista[i] > max) {
+    while (i > LIM) {
+        if (lista[i] > max) {
             max = lista[i]~
         }
         i++~
@@ -51,7 +51,7 @@ def minimo (lista) {
     var i = 1~
     var min = lista[0]~
 
-    while (i < LIM) {
+   for (var i = 0; i < LIM; i++) {
         if (lista[i] < min) {
             min = lista[i]~
         }
